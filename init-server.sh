@@ -201,12 +201,17 @@ ufw allow 80/tcp   comment "HTTP"
 ufw allow 443/tcp  comment "HTTPS"
 # Port 3000 (Dokploy) intentionally NOT opened — Tailscale only
 
+ufw --force enable
+systemctl enable ufw
+
 curl -fsSL "${UFW_DOCKER_URL}" -o /usr/local/bin/ufw-docker
 chmod +x /usr/local/bin/ufw-docker
 ufw-docker install
 
-ufw --force enable
-systemctl enable ufw
+# Allow Traefik to receive external HTTP/HTTPS traffic (required for Let's Encrypt HTTP-01 challenge)
+ufw-docker allow dokploy-traefik 80
+ufw-docker allow dokploy-traefik 443
+systemctl restart ufw
 
 # ─── fail2ban ────────────────────────────────────────────────────────────────
 
