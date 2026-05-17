@@ -1,0 +1,17 @@
+# Private planning docs
+docs/plans/
+
+# Private dashboard
+docs/dashboard.html
+
+# Claude Code settings
+.claude/
+
+# Editor settings
+.vscode/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
