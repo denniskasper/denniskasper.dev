@@ -7,6 +7,8 @@
 # Uptime targets (prod only) come from input, never hardcoding — either:
 #   - pass UPTIME_URLS="https://a https://b" in the environment, or
 #   - leave it unset and the overlay prompts for it interactively (blank = none).
+# Deploy webhook tunnel (any role): set DEPLOY_TUNNEL_TOKEN (a Cloudflare tunnel
+#   connector token) to install cloudflared non-interactively; blank = prompt/skip.
 set -euo pipefail
 
 SERVER_ROLE="${SERVER_ROLE:-dev}"
@@ -41,6 +43,27 @@ CRON
   else
     echo "Site overlay: no URLs given — skipping uptime monitoring."
   fi
+fi
+
+# ─── Deploy webhook tunnel (optional, any role) ───────────────────────────────
+# A Cloudflare named tunnel (created in the Zero Trust dashboard, with a public
+# hostname path-scoped to the deploy webhook there) exposes ONLY the CI/CD
+# webhook publicly while the Dokploy panel stays Tailscale-only. Paste its
+# connector token to install the connector non-interactively; blank = skip.
+DEPLOY_TUNNEL_TOKEN="${DEPLOY_TUNNEL_TOKEN:-}"
+if [[ -z "$DEPLOY_TUNNEL_TOKEN" && -t 0 ]]; then
+  read -rsp "Cloudflare tunnel token for the deploy webhook (blank = skip): " DEPLOY_TUNNEL_TOKEN
+  echo ""
+fi
+if [[ -n "$DEPLOY_TUNNEL_TOKEN" ]]; then
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    # .deb is reliable on brand-new Ubuntu where the apt repo may lack the codename.
+    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+    dpkg -i /tmp/cloudflared.deb
+    rm -f /tmp/cloudflared.deb
+  fi
+  cloudflared service install "$DEPLOY_TUNNEL_TOKEN"
+  echo "Site overlay: cloudflared deploy-tunnel connector installed (routing configured in Cloudflare)."
 fi
 
 # ─── Post-bootstrap reminder ──────────────────────────────────────────────────
