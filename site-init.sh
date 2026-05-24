@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# Site overlay for denniskasper.{com,dev} — invoked by init-server.sh once the
-# base system (Docker, Dokploy, UFW, msmtp, crons) is in place. Keeps host- and
-# owner-specific setup out of the generic bootstrap so init-server.sh stays
-# reusable on any server.
+# Site overlay — invoked by init-server.sh once the base system (Docker, Dokploy,
+# UFW, msmtp, crons) is in place. Carries host-specific *behaviour* but no baked-in
+# URLs or owner facts, so this file stays generic and shareable.
 #
-# Exported by init-server.sh: SERVER_ROLE, ALERT_EMAIL, PUBLIC_IP, TAILSCALE_IP,
-# NEW_USER. (ALERT_EMAIL is empty on dev, which sends no mail.)
+# From init-server.sh (env): SERVER_ROLE, ALERT_EMAIL, PUBLIC_IP, TAILSCALE_IP, NEW_USER.
+# Uptime targets (prod only) come from input, never hardcoding — either:
+#   - pass UPTIME_URLS="https://a https://b" in the environment, or
+#   - leave it unset and the overlay prompts for it interactively (blank = none).
 set -euo pipefail
 
 SERVER_ROLE="${SERVER_ROLE:-dev}"
+UPTIME_URLS="${UPTIME_URLS:-}"
 
-# ─── Uptime monitoring (prod only — dev is a playground, sends no mail) ───────
+# ─── Uptime monitoring (prod only — it emails alerts, and dev has no mail relay) ──
 if [[ "$SERVER_ROLE" == "prod" ]]; then
-  : "${ALERT_EMAIL:?prod overlay needs ALERT_EMAIL from init-server.sh}"
-  UPTIME_URLS="https://denniskasper.com https://leprechaun.denniskasper.com"
+  # Take URLs from the environment; if none and we have a terminal, ask.
+  if [[ -z "$UPTIME_URLS" && -t 0 ]]; then
+    read -rp "URLs to monitor for uptime (space-separated, blank = none): " UPTIME_URLS
+  fi
 
-  cat > /usr/local/bin/uptime-check <<SCRIPT
+  if [[ -n "$UPTIME_URLS" ]]; then
+    : "${ALERT_EMAIL:?uptime monitoring needs ALERT_EMAIL from init-server.sh}"
+
+    cat > /usr/local/bin/uptime-check <<SCRIPT
 #!/bin/sh
 for URL in ${UPTIME_URLS}; do
   HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "\$URL" || echo "000")
@@ -25,22 +32,21 @@ for URL in ${UPTIME_URLS}; do
   fi
 done
 SCRIPT
-  chmod +x /usr/local/bin/uptime-check
+    chmod +x /usr/local/bin/uptime-check
 
-  cat > /etc/cron.d/uptime-check <<'CRON'
+    cat > /etc/cron.d/uptime-check <<'CRON'
 */5 * * * * root /usr/local/bin/uptime-check
 CRON
-  echo "Site overlay: installed uptime-check for ${UPTIME_URLS}"
+    echo "Site overlay: installed uptime-check for ${UPTIME_URLS}"
+  else
+    echo "Site overlay: no URLs given — skipping uptime monitoring."
+  fi
 fi
 
-# ─── App deploy reminders ────────────────────────────────────────────────────
+# ─── Post-bootstrap reminder ──────────────────────────────────────────────────
 echo ""
-echo "Site overlay (${SERVER_ROLE}) — app deploy targets:"
+echo "Site overlay (${SERVER_ROLE}) done. Deploy your apps via the Dokploy UI."
 if [[ "$SERVER_ROLE" == "dev" ]]; then
-  echo "  - hello.denniskasper.dev (smoke-test the wildcard cert)"
-  echo "  Wildcard TLS is manual: in Dokploy -> Traefik, add a Cloudflare DNS-01"
-  echo "  resolver + CF_DNS_API_TOKEN (scoped Zone:DNS:Edit). Not bootstrapped."
-else
-  echo "  - denniskasper.com (homepage)"
-  echo "  - leprechaun.denniskasper.com (OpenLeprechaun)"
+  echo "Wildcard TLS, if you need it, is a manual Dokploy step: Traefik -> add a"
+  echo "Cloudflare DNS-01 resolver + CF_DNS_API_TOKEN (scoped Zone:DNS:Edit)."
 fi
