@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Bootstrap script for denniskasper.{dev,com} — single script for both servers.
-# Usage: bash init-server.sh [--force]
-# Run as root on a fresh Ubuntu 26.04 LTS VPS (Strato VPS for prod, Hetzner Cloud for dev).
+# Generic Dokploy server bootstrap — hardens a fresh Ubuntu LTS VPS and installs
+# Docker Swarm + Dokploy. Holds no host- or owner-specific facts; anything tied
+# to a particular server (which apps to monitor, deploy reminders, etc.) lives
+# in an optional site overlay — see the "Site-specific overlay" section.
+# Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS VPS)
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DOKPLOY_VERSION="v0.29.4"
-ALERT_EMAIL="dennis.m.kasper@gmail.com"
-GMAIL_SMTP_HOST="smtp.gmail.com"
-GMAIL_SMTP_PORT="587"
+SMTP_HOST="smtp.gmail.com"
+SMTP_PORT="587"
 UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/master/ufw-docker"
 
 # ─── Safety check ────────────────────────────────────────────────────────────
@@ -34,7 +37,18 @@ echo "=== init-server.sh — Dokploy server bootstrap ==="
 echo ""
 
 read -rp "Username to create (e.g. dennis): " NEW_USER
-read -rp "SSH public key for ${NEW_USER}: " SSH_PUBKEY
+
+# SSH_PUBKEY is the operator's *public* key, which lives on their LOCAL machine
+# (the one they SSH from) — not on this server. Retrieve it locally with:
+#   cat ~/.ssh/id_ed25519.pub   (or ~/.ssh/id_rsa.pub)
+# No key yet? Create one locally with `ssh-keygen -t ed25519`, then cat the .pub.
+echo ""
+echo "Paste the SSH PUBLIC key for ${NEW_USER} — from your LOCAL machine, not this server."
+echo "  Print it locally:  cat ~/.ssh/id_ed25519.pub   (or ~/.ssh/id_rsa.pub)"
+echo "  No key yet?        ssh-keygen -t ed25519   then cat the .pub file"
+echo "  Use the .pub (starts 'ssh-ed25519'/'ssh-rsa') — never the private key."
+read -rp "SSH public key: " SSH_PUBKEY
+
 read -rp "Server role [dev|prod]: " SERVER_ROLE
 
 if [[ "$SERVER_ROLE" != "dev" && "$SERVER_ROLE" != "prod" ]]; then
@@ -42,31 +56,51 @@ if [[ "$SERVER_ROLE" != "dev" && "$SERVER_ROLE" != "prod" ]]; then
   exit 1
 fi
 
-read -rp "Tailscale auth key (ephemeral, from Tailscale admin console): " TS_AUTHKEY
-read -rsp "Gmail SMTP app password (from pass smtp/gmail-app-password): " GMAIL_APP_PASSWORD
+# TS_AUTHKEY is generated in the Tailscale admin console (it is NOT a password).
+# Generate an *ephemeral* key so the node auto-removes when it goes offline:
+#   https://login.tailscale.com/admin/settings/keys  →  "Generate auth key"
+echo ""
+echo "Tailscale auth key — generate one in the admin console (not a password):"
+echo "  https://login.tailscale.com/admin/settings/keys  ->  'Generate auth key'"
+echo "  Enable 'Ephemeral' so this node auto-removes when offline. Starts 'tskey-auth-'."
+read -rsp "Tailscale auth key (input hidden): " TS_AUTHKEY
 echo ""
 
-CF_DNS_TOKEN=""
-if [[ "$SERVER_ROLE" == "dev" ]]; then
-  read -rsp "Cloudflare DNS API token (Zone:DNS:Edit on denniskasper.dev only): " CF_DNS_TOKEN
+# Mail relay credentials — prod only. Dev sends no mail, so none are collected.
+ALERT_EMAIL=""
+SMTP_PASSWORD=""
+if [[ "$SERVER_ROLE" == "prod" ]]; then
+  read -rp  "Alert / SMTP sender email (receives disk + uptime alerts): " ALERT_EMAIL
+  read -rsp "SMTP app password for ${ALERT_EMAIL}: " SMTP_PASSWORD
   echo ""
 fi
 
 # ─── Detect public IP ────────────────────────────────────────────────────────
 
-PUBLIC_IP=$(curl -s --retry 3 ifconfig.me)
+# Prefer IPv4 — Swarm advertise-addr and the SSH-test hint need a v4 address that
+# clients can actually reach; fall back to whatever curl returns on a v6-only host.
+PUBLIC_IP=$(curl -4 -fsS --retry 3 ifconfig.me 2>/dev/null || curl -fsS --retry 3 ifconfig.me)
 echo "Detected public IP: ${PUBLIC_IP}"
 
 # ─── System updates ──────────────────────────────────────────────────────────
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get upgrade -yq
+apt-get full-upgrade -yq
+
 apt-get install -yq \
   ca-certificates curl gnupg lsb-release \
-  ufw fail2ban msmtp msmtp-mta mailutils \
-  systemd-timesyncd \
-  jq
+  ufw fail2ban \
+  systemd-timesyncd
+
+# Mail relay packages only on prod — dev sends no email.
+if [[ "$SERVER_ROLE" == "prod" ]]; then
+  apt-get install -yq msmtp msmtp-mta mailutils
+fi
+
+# Strip orphaned packages and cached archives for a clean baseline.
+apt-get autoremove -yq
+apt-get autoclean -q
 
 # ─── journald size cap ───────────────────────────────────────────────────────
 
@@ -133,22 +167,6 @@ fi
 
 systemctl enable --now docker
 
-# ─── Validate Cloudflare token scope (dev only) ───────────────────────────────
-
-if [[ "$SERVER_ROLE" == "dev" && -n "$CF_DNS_TOKEN" ]]; then
-  echo "Validating Cloudflare token scope..."
-  CF_VERIFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
-    -H "Authorization: Bearer ${CF_DNS_TOKEN}" \
-    -H "Content-Type: application/json")
-  CF_SUCCESS=$(echo "$CF_VERIFY" | jq -r '.success')
-  if [[ "$CF_SUCCESS" != "true" ]]; then
-    echo "ERROR: Cloudflare token verification failed." >&2
-    echo "$CF_VERIFY" | jq . >&2
-    exit 1
-  fi
-  echo "Cloudflare token verified OK."
-fi
-
 # ─── Docker Swarm ─────────────────────────────────────────────────────────────
 
 docker swarm init --advertise-addr "${PUBLIC_IP}"
@@ -156,20 +174,13 @@ docker swarm init --advertise-addr "${PUBLIC_IP}"
 # ─── Tailscale ───────────────────────────────────────────────────────────────
 
 curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="$(hostname)"
+# Deterministic node name → predictable MagicDNS URL (dokploy-dev / dokploy-prod)
+# instead of the cloud's default hostname; the ephemeral node re-registers cleanly.
+tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="dokploy-${SERVER_ROLE}"
 TAILSCALE_IP=$(tailscale ip -4)
 echo "Tailscale IP: ${TAILSCALE_IP}"
 
-# ─── Docker Secrets ──────────────────────────────────────────────────────────
-
-DOKPLOY_POSTGRES_PASSWORD=$(openssl rand -hex 32)
-printf '%s' "${DOKPLOY_POSTGRES_PASSWORD}" | docker secret create POSTGRES_PASSWORD -
-
-if [[ "$SERVER_ROLE" == "dev" && -n "$CF_DNS_TOKEN" ]]; then
-  printf '%s' "${CF_DNS_TOKEN}" | docker secret create CF_DNS_TOKEN -
-fi
-
-# ─── Dokploy (pinned version, Docker Secrets mode) ───────────────────────────
+# ─── Dokploy (pinned version) ────────────────────────────────────────────────
 
 echo "Installing Dokploy ${DOKPLOY_VERSION}..."
 
@@ -199,7 +210,8 @@ ufw default allow outgoing
 ufw allow 22/tcp   comment "SSH"
 ufw allow 80/tcp   comment "HTTP"
 ufw allow 443/tcp  comment "HTTPS"
-# Port 3000 (Dokploy) intentionally NOT opened — Tailscale only
+# Port 3000 (Dokploy) intentionally NOT opened to the public — reachable only
+# via Tailscale (persistent DOCKER-USER rule added below, after ufw-docker install)
 
 ufw --force enable
 systemctl enable ufw
@@ -211,6 +223,15 @@ ufw-docker install
 # Allow Traefik to receive external HTTP/HTTPS traffic (required for Let's Encrypt HTTP-01 challenge)
 ufw-docker allow dokploy-traefik 80
 ufw-docker allow dokploy-traefik 443
+
+# Allow the Dokploy admin UI (port 3000) to be reached over Tailscale only.
+# ufw-docker blocks Swarm-published ports by default, and a plain `ufw allow`
+# rule does NOT help because Docker's DNAT runs in PREROUTING before UFW's INPUT
+# chain ever sees the packet. The reliable, reboot-persistent fix is to accept
+# traffic arriving on the tailscale0 interface inside the DOCKER-USER (FORWARD)
+# chain, written into after.rules so UFW replays it on every boot.
+sed -i '/^-A DOCKER-USER -j ufw-user-forward$/a -A DOCKER-USER -i tailscale0 -j ACCEPT' /etc/ufw/after.rules
+
 systemctl restart ufw
 
 # ─── fail2ban ────────────────────────────────────────────────────────────────
@@ -225,32 +246,35 @@ EOF
 
 systemctl enable --now fail2ban
 
-# ─── msmtp (Gmail SMTP relay) ────────────────────────────────────────────────
+# ─── msmtp (SMTP relay) ──────────────────────────────────────────────────────
 
-cat > /etc/msmtprc <<EOF
+# Prod only — dev sends no email (no SMTP relay configured).
+if [[ "$SERVER_ROLE" == "prod" ]]; then
+  cat > /etc/msmtprc <<EOF
 defaults
 auth           on
 tls            on
 tls_trust_file /etc/ssl/certs/ca-certificates.crt
 logfile        /var/log/msmtp.log
 
-account        gmail
-host           ${GMAIL_SMTP_HOST}
-port           ${GMAIL_SMTP_PORT}
+account        smtp
+host           ${SMTP_HOST}
+port           ${SMTP_PORT}
 from           ${ALERT_EMAIL}
 user           ${ALERT_EMAIL}
-password       ${GMAIL_APP_PASSWORD}
+password       ${SMTP_PASSWORD}
 
-account default : gmail
+account default : smtp
 EOF
-chmod 600 /etc/msmtprc
+  chmod 600 /etc/msmtprc
 
-# Route system mail through msmtp
-ln -sf /usr/bin/msmtp /usr/sbin/sendmail
+  # Route system mail through msmtp
+  ln -sf /usr/bin/msmtp /usr/sbin/sendmail
 
-# Test mail delivery
-echo "Subject: init-server.sh — mail test from $(hostname)" \
-  | msmtp "${ALERT_EMAIL}" || echo "WARN: test mail failed, check /var/log/msmtp.log"
+  # Test mail delivery
+  echo "Subject: init-server.sh — mail test from $(hostname)" \
+    | msmtp "${ALERT_EMAIL}" || echo "WARN: test mail failed, check /var/log/msmtp.log"
+fi
 
 # ─── Disk hygiene cron ───────────────────────────────────────────────────────
 
@@ -261,36 +285,57 @@ docker container prune -f
 CRON
 chmod +x /etc/cron.daily/docker-prune
 
-cat > /etc/cron.d/disk-alert <<CRON
+# Disk-full email alert — prod only (dev: no email; owner watches disk manually).
+if [[ "$SERVER_ROLE" == "prod" ]]; then
+  cat > /etc/cron.d/disk-alert <<CRON
 */5 * * * * root \
   USED=\$(df / --output=pcent | tail -1 | tr -d ' %'); \
   [ "\$USED" -gt 80 ] && echo "Disk usage on \$(hostname) is \${USED}%%" \
     | mail -s "ALERT: disk > 80%% on \$(hostname)" ${ALERT_EMAIL}
 CRON
-
-# ─── Uptime check cron ───────────────────────────────────────────────────────
-
-if [[ "$SERVER_ROLE" == "prod" ]]; then
-  UPTIME_URLS="https://denniskasper.com https://leprechaun.denniskasper.com"
-else
-  UPTIME_URLS="https://denniskasper.dev"
 fi
 
-cat > /usr/local/bin/uptime-check <<SCRIPT
-#!/bin/sh
-for URL in ${UPTIME_URLS}; do
-  HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "\$URL" || echo "000")
-  if [ "\$HTTP_CODE" != "200" ]; then
-    echo "\$URL returned HTTP \$HTTP_CODE" \
-      | mail -s "ALERT: \$URL down on \$(hostname)" ${ALERT_EMAIL}
-  fi
-done
-SCRIPT
-chmod +x /usr/local/bin/uptime-check
+# ─── Site-specific overlay (optional) ────────────────────────────────────────
+# Everything tied to a *particular* server — which URLs to monitor, app deploy
+# steps, owner-specific policy — is kept OUT of this generic bootstrap. Point at
+# an overlay with SITE_INIT (a URL or a local path); it defaults to a site-init.sh
+# next to this script — present on a repo clone, absent on a single-file curl.
+# The overlay runs here, after the base system is in place, receiving
+# SERVER_ROLE/ALERT_EMAIL/PUBLIC_IP/TAILSCALE_IP/NEW_USER. See site-init.example.sh.
 
-cat > /etc/cron.d/uptime-check <<'CRON'
-*/5 * * * * root /usr/local/bin/uptime-check
-CRON
+SITE_INIT="${SITE_INIT:-${SCRIPT_DIR}/site-init.sh}"
+
+run_site_overlay() {
+  local src="$1" script
+  if [[ "$src" =~ ^https?:// ]]; then
+    script="$(mktemp)"
+    echo "Fetching site overlay: ${src}"
+    if ! curl -fsSL "$src" -o "$script"; then
+      echo "WARN: could not fetch site overlay ${src} — skipping." >&2
+      rm -f "$script"
+      return
+    fi
+  elif [[ -f "$src" ]]; then
+    script="$src"
+  else
+    echo "No site overlay (SITE_INIT='${src}' not found) — skipping server-specific setup."
+    return
+  fi
+
+  echo "Running site overlay: ${src}"
+  SERVER_ROLE="$SERVER_ROLE" \
+  ALERT_EMAIL="$ALERT_EMAIL" \
+  PUBLIC_IP="$PUBLIC_IP" \
+  TAILSCALE_IP="$TAILSCALE_IP" \
+  NEW_USER="$NEW_USER" \
+    bash "$script"
+
+  if [[ "$src" =~ ^https?:// ]]; then
+    rm -f "$script"
+  fi
+}
+
+run_site_overlay "$SITE_INIT"
 
 # ─── Non-root user ───────────────────────────────────────────────────────────
 
@@ -349,13 +394,8 @@ echo "Tailscale IP     : ${TAILSCALE_IP}"
 echo "Dokploy version  : ${DOKPLOY_VERSION}"
 echo ""
 echo "Next steps:"
-echo "  1. Open Dokploy admin UI via Tailscale: https://dokploy.<tailnet>.ts.net:3000"
-echo "  2. Create admin account and enable 2FA."
-if [[ "$SERVER_ROLE" == "dev" ]]; then
-  echo "  3. Deploy a smoke-test app at hello.denniskasper.dev to verify wildcard cert."
-else
-  echo "  3. Deploy homepage: denniskasper.com"
-  echo "  4. Deploy OpenLeprechaun: leprechaun.denniskasper.com"
-fi
+echo "  1. Open the Dokploy admin UI via Tailscale: http://dokploy-${SERVER_ROLE}.<tailnet>.ts.net:3000"
+echo "  2. Create the admin account and enable 2FA."
+echo "  3. Deploy your apps (host-specific steps live in your site overlay)."
 echo ""
 echo "Root login is now disabled. Use: ssh ${NEW_USER}@${PUBLIC_IP}"
