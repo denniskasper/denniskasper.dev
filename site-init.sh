@@ -37,7 +37,7 @@ SCRIPT
     chmod +x /usr/local/bin/uptime-check
 
     cat > /etc/cron.d/uptime-check <<'CRON'
-*/5 * * * * root /usr/local/bin/uptime-check
+0 * * * * root /usr/local/bin/uptime-check
 CRON
     echo "Site overlay: installed uptime-check for ${UPTIME_URLS}"
   else
