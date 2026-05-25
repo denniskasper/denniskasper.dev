@@ -11,10 +11,10 @@
 #   connector token) to install cloudflared non-interactively; blank = prompt/skip.
 set -euo pipefail
 
-SERVER_ROLE="${SERVER_ROLE:-dev}"
+SERVER_ROLE="${SERVER_ROLE:-int}"
 UPTIME_URLS="${UPTIME_URLS:-}"
 
-# ─── Uptime monitoring (prod only — it emails alerts, and dev has no mail relay) ──
+# ─── Uptime monitoring (prod only — it emails alerts, and int has no mail relay) ──
 if [[ "$SERVER_ROLE" == "prod" ]]; then
   # Take URLs from the environment; if none and we have a terminal, ask.
   if [[ -z "$UPTIME_URLS" && -t 0 ]]; then
@@ -69,7 +69,7 @@ fi
 # ─── Post-bootstrap reminder ──────────────────────────────────────────────────
 echo ""
 echo "Site overlay (${SERVER_ROLE}) done. Deploy your apps via the Dokploy UI."
-if [[ "$SERVER_ROLE" == "dev" ]]; then
+if [[ "$SERVER_ROLE" == "int" ]]; then
   echo "Wildcard TLS, if you need it, is a manual Dokploy step: Traefik -> add a"
   echo "Cloudflare DNS-01 resolver + CF_DNS_API_TOKEN (scoped Zone:DNS:Edit)."
 fi

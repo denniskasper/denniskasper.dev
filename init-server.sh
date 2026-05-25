@@ -49,10 +49,13 @@ echo "  No key yet?        ssh-keygen -t ed25519   then cat the .pub file"
 echo "  Use the .pub (starts 'ssh-ed25519'/'ssh-rsa') — never the private key."
 read -rp "SSH public key: " SSH_PUBKEY
 
-read -rp "Server role [dev|prod]: " SERVER_ROLE
+# Roles: 'int' = integration (a non-prod server; sends no mail) · 'prod' =
+# production (mail relay + uptime/disk alerts). 'dev' now means local development
+# only — no server — so it is intentionally not a valid role here.
+read -rp "Server role [int|prod]: " SERVER_ROLE
 
-if [[ "$SERVER_ROLE" != "dev" && "$SERVER_ROLE" != "prod" ]]; then
-  echo "ERROR: role must be 'dev' or 'prod'" >&2
+if [[ "$SERVER_ROLE" != "int" && "$SERVER_ROLE" != "prod" ]]; then
+  echo "ERROR: role must be 'int' or 'prod'" >&2
   exit 1
 fi
 
@@ -66,7 +69,7 @@ echo "  Enable 'Ephemeral' so this node auto-removes when offline. Starts 'tskey
 read -rsp "Tailscale auth key (input hidden): " TS_AUTHKEY
 echo ""
 
-# Mail relay credentials — prod only. Dev sends no mail, so none are collected.
+# Mail relay credentials — prod only. Int sends no mail, so none are collected.
 ALERT_EMAIL=""
 SMTP_PASSWORD=""
 if [[ "$SERVER_ROLE" == "prod" ]]; then
@@ -93,7 +96,7 @@ apt-get install -yq \
   ufw fail2ban \
   systemd-timesyncd
 
-# Mail relay packages only on prod — dev sends no email.
+# Mail relay packages only on prod — int sends no email.
 if [[ "$SERVER_ROLE" == "prod" ]]; then
   apt-get install -yq msmtp msmtp-mta mailutils
 fi
@@ -174,7 +177,7 @@ docker swarm init --advertise-addr "${PUBLIC_IP}"
 # ─── Tailscale ───────────────────────────────────────────────────────────────
 
 curl -fsSL https://tailscale.com/install.sh | sh
-# Deterministic node name → predictable MagicDNS URL (dokploy-dev / dokploy-prod)
+# Deterministic node name → predictable MagicDNS URL (dokploy-int / dokploy-prod)
 # instead of the cloud's default hostname; the ephemeral node re-registers cleanly.
 tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="dokploy-${SERVER_ROLE}"
 TAILSCALE_IP=$(tailscale ip -4)
@@ -248,7 +251,7 @@ systemctl enable --now fail2ban
 
 # ─── msmtp (SMTP relay) ──────────────────────────────────────────────────────
 
-# Prod only — dev sends no email (no SMTP relay configured).
+# Prod only — int sends no email (no SMTP relay configured).
 if [[ "$SERVER_ROLE" == "prod" ]]; then
   cat > /etc/msmtprc <<EOF
 defaults
@@ -285,7 +288,7 @@ docker container prune -f
 CRON
 chmod +x /etc/cron.daily/docker-prune
 
-# Disk-full email alert — prod only (dev: no email; owner watches disk manually).
+# Disk-full email alert — prod only (int: no email; owner watches disk manually).
 if [[ "$SERVER_ROLE" == "prod" ]]; then
   cat > /etc/cron.d/disk-alert <<CRON
 */5 * * * * root \
