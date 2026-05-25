@@ -4,6 +4,9 @@
 # to a particular server (which apps to monitor, deploy reminders, etc.) lives
 # in an optional site overlay — see the "Site-specific overlay" section.
 # Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS VPS)
+# Quickstart (fetch + run from main, with this repo's overlay):
+#   curl -fsSL https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/init-server.sh -o init-server.sh && \
+#     SITE_INIT=https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/site-init.sh bash init-server.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
