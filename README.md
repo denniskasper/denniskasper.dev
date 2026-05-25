@@ -149,3 +149,62 @@ if you don't have it saved.
    spaces).
 4. Use it as the SMTP password at bootstrap step 2. Host/port/user are baked in:
    `smtp.gmail.com:587`, user = the alert email.
+
+---
+
+## Enterprise-readiness — open notes (NOT decided, to revisit)
+
+> Status: **undecided / parked.** Captured to pick up later *if* this setup ever needs to
+> serve real customers / carry an SLA. Today: single VPS + Dokploy + Traefik, Cloudflare in
+> front, admin Tailscale-only. This is a solid Tier-0 setup; the notes below are the path up.
+
+### The deploy tunnel is *not* the weak link
+The cloudflared tunnel carries **only the CI deploy webhook** (`deploy.<domain>/api/deploy/github`
+→ `localhost:3000`). **Customer traffic never uses it** — visitors hit Cloudflare → Traefik
+`:443` directly. If the connector dies, deploys stop but the site stays up. For HA, run 2+
+`cloudflared` replicas of the same named tunnel (Cloudflare load-balances them).
+
+The real ingress hardening is the **origin**, not the tunnel: the origin IP is known and
+`:80/:443` are open, so an attacker can bypass Cloudflare/WAF by hitting the IP directly.
+Options: lock the origin firewall to **Cloudflare IP ranges** + **Authenticated Origin Pulls**
+(mTLS CF→origin), or move customer traffic onto a Cloudflare Tunnel too (origin outbound-only).
+
+### Bigger gaps to close before "enterprise" (priority order)
+1. **Backups / DR — currently none.** Automated off-box DB backups (S3/R2) + a *tested* restore
+   runbook; move stateful apps to **managed Postgres** (PITR, failover). (The prod homepage is
+   static/stateless → low risk; the only stateful piece today is OL's Postgres on int.)
+2. **HA / single-VPS SPOF.** One box runs Traefik + apps + Dokploy + Postgres; its death = full
+   outage. Multi-node Swarm (Dokploy supports worker nodes) or a managed platform behind a load
+   balancer; ≥2 app nodes across AZs.
+3. **Observability / on-call.** Today: hourly uptime cron + disk alert. Add external multi-region
+   probes + escalation (PagerDuty/Opsgenie), metrics/logs, alerts on error-rate/latency/cert
+   expiry/disk. (Note the known "Dokploy healthcheck green but UI 500" failure mode — needs
+   end-to-end probing, not just a port check.)
+4. **Secrets management.** Pasted into the Dokploy UI today (not auditable; lose Dokploy =
+   regenerate everything). Move to Vault / Doppler / Infisical / a cloud secrets manager with
+   rotation + audit.
+5. **Release safety.** A true staging mirror, migration gates, blue-green/canary, easy rollback.
+   (int / `denniskasper.dev` is a playground, not prod-parity.)
+6. **Compliance** (only if customers demand SOC2 / ISO / GDPR): audit logs, access control,
+   change management, incident-response plan, DPA, data residency.
+7. **Scale.** Fixed CPU/RAM on one VPS; enterprise load needs horizontal scale + autoscale + LB.
+
+### What's already good (keep)
+Reproducible `init-server.sh` (IaC foundation); pinned Dokploy + auto-update disabled;
+**admin plane off the public internet (Tailscale-only)**; Cloudflare front (DDoS / WAF / TLS);
+hardened host (UFW, fail2ban, key-only SSH, no root, unattended security upgrades); clean
+int/prod split.
+
+### Maturity ladder
+- **Tier 0 (today):** portfolio + low-stakes prod (few users, no SLA, no sensitive data).
+- **Tier 1 (first paying customers):** off-box backups + tested restore, external monitoring +
+  on-call, managed Postgres, a real staging env, a 2nd tunnel connector.
+- **Tier 2 (enterprise SLAs):** multi-node HA + LB across AZs, managed DB w/ failover + PITR,
+  secrets manager, full observability, Terraform + GitOps, DR plan with RTO/RPO targets, origin
+  locked to Cloudflare, compliance program.
+
+### To answer when we pick this up
+- Stateful app with customer data, or stateless-at-scale? (decides whether backups/DB or HA/CDN dominate)
+- Target SLA / acceptable downtime?
+- Data sensitivity / compliance (PII, payments, SOC2)?
+- Expected load / growth curve?
