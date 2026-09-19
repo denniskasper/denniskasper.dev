@@ -15,6 +15,7 @@ DOKPLOY_VERSION="v0.29.4"
 SMTP_HOST="smtp.gmail.com"
 SMTP_PORT="587"
 UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/master/ufw-docker"
+TRAEFIK_FIREWALL_SYNC_URL="https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/traefik-firewall-sync.sh"
 
 # ─── Safety check ────────────────────────────────────────────────────────────
 
@@ -239,6 +240,17 @@ ufw-docker allow dokploy-traefik 443
 sed -i '/^-A DOCKER-USER -j ufw-user-forward$/a -A DOCKER-USER -i tailscale0 -j ACCEPT' /etc/ufw/after.rules
 
 systemctl restart ufw
+
+# The two `ufw-docker allow` rules above are pinned to the address Traefik has today. Dokploy
+# recreates that container on updates and whenever Traefik's environment or ports are changed in
+# the panel, it can come back with another address, and every public site then times out. The sync
+# script re-reads where Docker forwards 80 and 443 and keeps the rules in step, every minute.
+if [[ -f "${SCRIPT_DIR}/traefik-firewall-sync.sh" ]]; then
+  cp "${SCRIPT_DIR}/traefik-firewall-sync.sh" /tmp/traefik-firewall-sync.sh
+else
+  curl -fsSL "${TRAEFIK_FIREWALL_SYNC_URL}" -o /tmp/traefik-firewall-sync.sh
+fi
+bash /tmp/traefik-firewall-sync.sh --install
 
 # ─── fail2ban ────────────────────────────────────────────────────────────────
 

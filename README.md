@@ -25,6 +25,22 @@ sanitized template — copy it and edit for a new server.
 exposes **only** the Dokploy deploy webhook publicly, keeping the admin panel
 Tailscale-only. It's idempotent and parameterized by `ROLE`. See step 4 below.
 
+`traefik-firewall-sync.sh` keeps UFW pointing at Traefik. The `ufw-docker allow`
+rules are pinned to the Traefik container's internal address, and Dokploy
+recreates that container on updates and whenever Traefik's environment or ports
+are changed in the panel. When it comes back with another address, every public
+site on the server **times out** while still answering over Tailscale. The script
+reads where Docker actually forwards ports 80 and 443 and makes the rules agree;
+`init-server.sh` installs it with a timer that runs it every minute. On a server
+bootstrapped before it existed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/traefik-firewall-sync.sh \
+  -o /tmp/traefik-firewall-sync.sh
+sudo bash /tmp/traefik-firewall-sync.sh --check     # says what it would change
+sudo bash /tmp/traefik-firewall-sync.sh --install
+```
+
 ---
 
 ## Re-provisioning the production server (denniskasper.com)
