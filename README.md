@@ -12,6 +12,9 @@ brackets>`.
 ## Contents
 
 - [`init-server.sh`](init-server.sh) — the whole bootstrap, one file.
+- [`traefik-firewall-sync.sh`](traefik-firewall-sync.sh) — keeps the firewall
+  pointed at Traefik's current address. Installed by the bootstrap; see
+  [Keeping UFW pointed at Traefik](#keeping-ufw-pointed-at-traefik).
 
 ---
 
@@ -167,6 +170,34 @@ than calling `iptables` is what makes it survive a reboot.
 Once the tailnet is up and you've confirmed Tailscale SSH works, closing **22**
 as well is worth considering: it drops the public surface to 80/443 and makes
 SSH brute-forcing a non-category. Only do it with console access available.
+
+### Keeping UFW pointed at Traefik
+The two `ufw-docker allow` rules are pinned to the address the Traefik container
+has *at that moment*. Dokploy recreates that container on updates, and whenever
+Traefik's environment or ports change in the panel — and it can come back on a
+different address. When that happens every public site on the server **times
+out**, while the panel keeps answering over Tailscale, which makes it look like
+a routing or DNS fault rather than a firewall one.
+
+`ufw-docker allow dokploy-traefik 80` cannot repair it either: it only knows the
+networks `docker inspect` lists, and a container attached to an overlay network
+alone has its published ports forwarded through `docker_gwbridge`, which is not
+among them.
+
+[`traefik-firewall-sync.sh`](traefik-firewall-sync.sh) asks the one source that
+cannot be wrong — Docker's own DNAT rules — where 80 and 443 actually go, and
+makes UFW agree. `init-server.sh` installs it with a systemd timer that runs it
+every minute. It is idempotent, and only ever removes rules it added itself,
+recognised by their comment.
+
+On a server bootstrapped before it existed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/traefik-firewall-sync.sh \
+  -o /tmp/traefik-firewall-sync.sh
+sudo bash /tmp/traefik-firewall-sync.sh --check     # says what it would change
+sudo bash /tmp/traefik-firewall-sync.sh --install
+```
 
 ### Disk
 Three defences, because a full disk is the most common way a small box dies:
