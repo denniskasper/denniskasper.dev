@@ -88,12 +88,13 @@ if prompting_for SSH_PUBKEY; then
 fi
 ask SSH_PUBKEY "SSH public key: "
 
-# The tailnet node name is an input, not a derived value — this script holds no
-# host-specific facts.
+# The machine's name is an input, not a derived value — this script holds no
+# host-specific facts. It becomes the OS hostname, the Swarm node name and the
+# tailnet node name, so the box has one name everywhere.
 if prompting_for TS_HOSTNAME; then
   echo ""
 fi
-ask TS_HOSTNAME "Tailscale hostname (e.g. web-01): "
+ask TS_HOSTNAME "Hostname for this machine (e.g. web-01): "
 
 # TS_AUTHKEY is generated in the Tailscale admin console (it is NOT a password).
 # Generate a *persistent* key with expiry disabled: this node is not disposable,
@@ -131,9 +132,10 @@ if [[ ! "$SSH_PUBKEY" =~ ^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) 
 fi
 
 # Validate as a DNS label rather than letting Tailscale silently sanitise it —
-# a surprise rename breaks the MagicDNS URL this script prints at the end.
+# a surprise rename breaks the MagicDNS URL this script prints at the end. The
+# same rule is what a Linux hostname needs, so one check covers both uses.
 if [[ ! "$TS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || ${#TS_HOSTNAME} -gt 63 ]]; then
-  echo "ERROR: Tailscale hostname must be a DNS label: lowercase a-z, 0-9 and '-'," >&2
+  echo "ERROR: hostname must be a DNS label: lowercase a-z, 0-9 and '-'," >&2
   echo "       not starting or ending with '-', at most 63 characters." >&2
   exit 1
 fi
@@ -142,6 +144,25 @@ if [[ "$ALERT_EMAIL" != *@*.* ]]; then
   echo "ERROR: ALERT_EMAIL does not look like an email address: ${ALERT_EMAIL}" >&2
   exit 1
 fi
+
+# ─── Hostname ────────────────────────────────────────────────────────────────
+# Cloud images ship a generic name — "ubuntu" on most of them — which makes every
+# alert mail and every `docker node ls` ambiguous the moment there is more than
+# one machine. Give the box one name and use it everywhere.
+#
+# This must happen BEFORE Docker starts: `docker swarm init` takes the node name
+# from the hostname, and renaming afterwards does not rename the node.
+
+hostnamectl set-hostname "${TS_HOSTNAME}"
+
+# Debian and Ubuntu resolve the local hostname through 127.0.1.1. Without this,
+# sudo prints "unable to resolve host" on every single invocation.
+if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+  sed -i -E "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${TS_HOSTNAME}/" /etc/hosts
+else
+  printf '127.0.1.1\t%s\n' "${TS_HOSTNAME}" >> /etc/hosts
+fi
+echo "Hostname: ${TS_HOSTNAME}"
 
 # ─── Detect public IP ────────────────────────────────────────────────────────
 
@@ -529,7 +550,7 @@ systemctl reload sshd
 
 echo ""
 echo "=== Bootstrap complete ==="
-echo "Tailscale host   : ${TS_HOSTNAME}"
+echo "Hostname         : ${TS_HOSTNAME}   (OS, Swarm node and tailnet node)"
 echo "Public IP        : ${PUBLIC_IP}"
 echo "Tailscale IP     : ${TAILSCALE_IP}"
 echo "Dokploy version  : ${DOKPLOY_VERSION}"

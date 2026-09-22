@@ -5,7 +5,7 @@ OS hardening, swap, Docker Swarm, Tailscale, UFW + ufw-docker, fail2ban, an SMTP
 relay for alerts, and Dokploy itself.
 
 It holds no facts about any particular machine. Every host-specific value is an
-input — the username, the SSH public key, the Tailscale hostname, the auth key,
+input — the username, the SSH public key, the machine's name, the auth key,
 the alert mailbox. Substitute your own wherever this README shows `<angle
 brackets>`.
 
@@ -37,7 +37,7 @@ Each value is taken from the environment if set, and prompted for otherwise:
 |---|---|---|
 | `NEW_USER` | Username to create | validated as a Linux username |
 | `SSH_PUBKEY` | SSH public key | your **`.pub`**, from the machine you SSH *from* |
-| `TS_HOSTNAME` | Tailscale hostname | validated as a DNS label |
+| `TS_HOSTNAME` | Hostname for this machine | validated as a DNS label; becomes the OS, Swarm and tailnet name |
 | `TS_AUTHKEY` | Tailscale auth key | hidden input |
 | `ALERT_EMAIL` | Alert / SMTP sender email | receives disk alerts |
 | `SMTP_PASSWORD` | SMTP app password | hidden input; see the appendix |
@@ -207,6 +207,17 @@ Three defences, because a full disk is the most common way a small box dies:
   deliberately never pruned; that's where the data lives.
 
 Plus a cron that emails `ALERT_EMAIL` when `/` passes 80%.
+
+### One name for the machine
+`TS_HOSTNAME` sets the **OS hostname, the Swarm node name and the tailnet node
+name**, so the box is called the same thing everywhere. Cloud images ship
+something generic — `ubuntu` on most of them — which makes every alert mail and
+every `docker node ls` ambiguous as soon as there is more than one machine.
+
+It is applied before Docker starts, because `docker swarm init` takes the node
+name from the hostname and renaming afterwards does not rename the node.
+`/etc/hosts` gets the matching `127.0.1.1` entry, without which `sudo` prints
+"unable to resolve host" on every invocation.
 
 ### Swap
 VPS images frequently ship with none. Docker builds spike well past steady-state
