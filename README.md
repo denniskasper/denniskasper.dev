@@ -78,9 +78,12 @@ on a disposable box and finding it on one with your data on it.
 - **SSH public key**, e.g. `~/.ssh/id_ed25519.pub`.
 
 ### 1. Install a clean OS
-Your provider's control panel → reinstall → **Ubuntu 24.04 LTS** → set a root
+Your provider's control panel → reinstall → **a current Ubuntu LTS** → set a root
 password or paste an SSH key. Check whether the public IP survives the
 reinstall; most providers preserve it, which saves a DNS change.
+
+On a very new release the Docker apt repository may not carry the codename yet;
+the bootstrap falls back to `get.docker.com` on its own if that happens.
 
 ### 2. Bootstrap
 `ssh root@<origin-ip>`, then run the [quickstart](#quickstart) command and
