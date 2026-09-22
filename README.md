@@ -239,6 +239,18 @@ Three defences, because a full disk is the most common way a small box dies:
 
 Plus a cron that emails `ALERT_EMAIL` when `/` passes 80%.
 
+### Tailscale, and who may change it
+`tailscale up` runs as root, so tailscaled's state is root-owned and the write
+subcommands — `serve`, `funnel`, `set` — are denied to everyone else. The bootstrap
+therefore runs `tailscale set --operator=<username>` once the account exists, so the
+user who actually works on the machine can manage its Tailscale configuration without
+`sudo`.
+
+This is not cosmetic. Anything running **as that user** rather than as root cannot
+`sudo` — a systemd *user* service that publishes itself over Tailscale Serve, for
+instance. Without the operator set, it fails at runtime with `Access denied: serve
+config denied`, long after the moment that would have explained it.
+
 ### One name for the machine
 `TS_HOSTNAME` sets the **OS hostname, the Swarm node name and the tailnet node
 name**, so the box is called the same thing everywhere. Cloud images ship

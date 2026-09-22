@@ -497,6 +497,20 @@ fi
 usermod -aG docker "${NEW_USER}"
 usermod -aG sudo "${NEW_USER}"
 
+# This script runs `tailscale up` as root, so tailscaled's state is root-owned and
+# every `tailscale` subcommand that writes — `serve`, `funnel`, `set` — is denied to
+# anyone else. That is a papercut the bootstrap itself creates: the account it just
+# made is the one that will actually use the machine.
+#
+# It matters most for anything running AS that user rather than as root. A systemd
+# *user* service that wants to publish itself over Tailscale Serve cannot sudo, so
+# without this it fails at runtime with "Access denied: serve config denied" rather
+# than at setup, which is a considerably worse place to find out.
+#
+# Reading remains unrestricted either way; this only grants the writes. Run after the
+# account exists, because tailscaled resolves the name.
+tailscale set --operator="${NEW_USER}"
+
 echo "${NEW_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${NEW_USER}"
 chmod 440 "/etc/sudoers.d/${NEW_USER}"
 
