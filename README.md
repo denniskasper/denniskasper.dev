@@ -239,9 +239,24 @@ in an overlay that runs near the end, after the base system exists.
 This repo ships no overlay. The mechanism costs nothing and stays.
 
 ### What it pulls at runtime
-Four unpinned fetches: `ufw-docker` from `master`, Docker's install script (only
-as a fallback), and two Dokploy scripts. Worth knowing if you care about
-reproducibility — it's the same reason to pin `init-server.sh` itself to a SHA.
+Seven fetches, none pinned to a version or a digest:
+
+| Fetched | When |
+|---|---|
+| Docker's apt GPG key | always |
+| `tailscale.com/install.sh` | always — **piped straight into `sh`** |
+| `dokploy.com/install.sh` | always |
+| `dokploy.com/security/0.26.6.sh` | always |
+| `ufw-docker`, from `master` | always |
+| `traefik-firewall-sync.sh`, from `main` | only when not sitting beside the script |
+| `get.docker.com` | only if the apt repo install fails |
+
+(Plus a site overlay, if `SITE_INIT` ever points at one. None ships.)
+
+The Dokploy scripts land in a temp file first, so a stopped run leaves something
+readable on disk; Tailscale's goes straight into a shell. Worth knowing if you care
+about reproducibility or about supply chain — and it is the same reason to pin
+`init-server.sh` itself to a commit SHA rather than `main`.
 
 ---
 

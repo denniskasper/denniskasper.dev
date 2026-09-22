@@ -277,7 +277,9 @@ echo "Tailscale IP: ${TAILSCALE_IP}"
 
 echo "Installing the latest Dokploy release..."
 
-# Download and inspect Dokploy install script before running
+# To a temp file rather than piped into bash, so a stopped run leaves something
+# readable on disk. Nothing here inspects it automatically — do that yourself if
+# you care, by fetching the URL before running this script.
 DOKPLOY_INSTALL_SCRIPT=$(mktemp)
 curl -fsSL "https://dokploy.com/install.sh" -o "${DOKPLOY_INSTALL_SCRIPT}"
 # DOKPLOY_VERSION is left unset on purpose — install.sh then takes the newest
