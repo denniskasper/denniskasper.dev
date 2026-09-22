@@ -215,6 +215,19 @@ configuration. Nothing has to be re-checked after a recreation, and there is no 
 and no repair script. A container publishing any other port is still blocked, which is
 what `ufw-docker` is there for.
 
+How wrong the container-named form can be is worth seeing once. Traefik under Dokploy
+attaches only to the overlay network, so `docker inspect` reports something like
+`10.0.1.7` while Docker's own DNAT sends traffic to a `docker_gwbridge` address such as
+`172.18.0.5`. A rule naming the inspected address is written against an address that
+never receives a packet.
+
+**These rules are TCP only, so HTTP/3 over UDP 443 does not reach the origin.** Traefik
+publishes 443/udp and Docker DNATs it, but nothing opens it, so clients fall back to
+TCP. That is usually the right trade: a CDN or reverse proxy in front speaks TCP to the
+origin anyway, and opening UDP 443 widens the surface for little gain. Add
+`ufw route allow proto udp from any to any port 443` if a hostname is served directly
+and HTTP/3 is wanted.
+
 ### Disk
 Three defences, because a full disk is the most common way a small box dies:
 - journald capped at **500 MB**.
