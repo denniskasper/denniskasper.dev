@@ -124,6 +124,19 @@ command -v grok   >/dev/null 2>&1 || curl -fsSL https://x.ai/cli/install.sh | ba
 
 export PATH="$HOME/.local/bin:$PATH"
 
+# A systemd *user* service reads neither ~/.profile nor ~/.bashrc — it inherits
+# whatever the user manager started with, which does not include ~/.local/bin. T3
+# Code finds some providers by searching known install directories, so Claude and
+# Codex are detected anyway and the gap stays hidden; Grok is not on that list and
+# simply never appears, with no error to explain it.
+#
+# environment.d is read when the user manager starts, so the file below covers
+# reboots and set-environment covers the current session.
+mkdir -p "$HOME/.config/environment.d"
+SERVICE_PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+printf 'PATH=%s\n' "$SERVICE_PATH" > "$HOME/.config/environment.d/10-local-bin.conf"
+systemctl --user set-environment "PATH=$SERVICE_PATH"
+
 # ─── T3 Code ─────────────────────────────────────────────────────────────────
 # Installed globally as root: NodeSource's prefix is root-owned, and /usr/bin is on
 # every PATH including the minimal one a systemd service gets. T3 keeps its own
