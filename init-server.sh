@@ -518,8 +518,11 @@ if prompting_for SSH_TEST; then
   echo ""
   echo "========================================================"
   echo "IMPORTANT: Before continuing, open a NEW terminal and run:"
-  echo "  ssh -i <your-key> ${NEW_USER}@${PUBLIC_IP}"
-  echo "Confirm you can log in as ${NEW_USER} with sudo access."
+  echo "  ssh ${NEW_USER}@${PUBLIC_IP}"
+  echo "  sudo -n true && echo OK"
+  echo ""
+  echo "Test sudo with 'sudo -n true', NOT 'sudo -v'. On sudo-rs (Ubuntu 26.04+)"
+  echo "-v authenticates even with NOPASSWD, and this account has no password."
   echo "========================================================"
 elif [[ -n "${SSH_TEST:-}" ]]; then
   echo ""

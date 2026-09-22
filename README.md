@@ -152,6 +152,24 @@ second terminal: it prints the exact `ssh` command and waits for a literal
 confirmation does it write the hardening config — no root login, no password
 auth, keys only — validate it with `sshd -t`, and reload.
 
+What to check in that second terminal:
+
+```bash
+ssh <username>@<origin-ip>
+sudo -n true && echo OK      # passwordless sudo works
+sudo whoami                  # prints root
+```
+
+> **Check sudo with `sudo -n true`, not `sudo -v`.** Ubuntu 26.04 and newer ship
+> `sudo-rs` rather than classic sudo, and its `-v` — "validate and refresh the
+> credential cache" — authenticates even for a user with `NOPASSWD`, where
+> classic sudo returns silently. This account is created with
+> `--disabled-password`, so the `[sudo: authenticate] Password:` prompt you get
+> cannot be satisfied by anything. The box is fine; the probe is wrong. Answering
+> `no` and hunting for the fault, or setting a password to get past it, are both
+> worse than the imaginary problem — the second undoes the key-only policy the
+> script just established.
+
 `SSH_TEST=yes` in the environment skips the pause, which is what allows an
 unattended rehearsal to finish. Don't set it on a box you can't afford to be
 locked out of; the point of the pause is that a human proved the new key works
