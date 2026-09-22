@@ -6,8 +6,11 @@
 # ships no overlay; the extension point stays for whoever needs one.
 # Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS VPS)
 # Quickstart (fetch + run from main):
-#   curl -fsSL https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/init-server.sh -o init-server.sh && \
+#   curl -fsSL https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/init-server.sh -o init-server.sh && \
 #     bash init-server.sh
+# Every input can also be supplied in the environment (see "Inputs"), so the
+# whole run can go unattended — rehearse it on a throwaway VM before pointing
+# it at a box you care about. This script is NOT idempotent; see "Safety check".
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,31 +36,98 @@ if docker info &>/dev/null 2>&1 && docker volume ls -q | grep -q .; then
   echo "WARNING: --force passed. Proceeding on server with existing data." >&2
 fi
 
-# ─── Interactive prompts ──────────────────────────────────────────────────────
+# ─── Inputs ───────────────────────────────────────────────────────────────────
+# Every value below can be supplied in the environment; anything left unset is
+# prompted for. Supplying all of them lets the whole script run unattended,
+# which is what makes a rehearsal on a throwaway VM cheap to repeat.
+#
+#   NEW_USER  SSH_PUBKEY  TS_HOSTNAME  TS_AUTHKEY  ALERT_EMAIL  SMTP_PASSWORD
+#   SSH_TEST  (the pre-lockdown confirmation — see "SSH lockdown")
+#
+# With no terminal to prompt on, a missing value is a named error rather than a
+# read that blocks forever.
+
+ask() {
+  local var="$1" prompt="$2" hidden="${3:-}"
+  if [[ -n "${!var:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: ${var} is unset and there is no terminal to prompt on." >&2
+    echo "       Set ${var} in the environment for an unattended run." >&2
+    exit 1
+  fi
+  if [[ -n "$hidden" ]]; then
+    read -rsp "$prompt" "$var"
+    echo ""
+  else
+    read -rp "$prompt" "$var"
+  fi
+}
+
+# True while a value still has to be asked for — gates the on-screen help so an
+# unattended run does not print instructions nobody is there to read.
+prompting_for() { [[ -z "${!1:-}" && -t 0 ]]; }
 
 echo ""
 echo "=== init-server.sh — Dokploy server bootstrap ==="
 echo ""
 
-read -rp "Username to create (e.g. dennis): " NEW_USER
+ask NEW_USER "Username to create (e.g. deploy): "
 
 # SSH_PUBKEY is the operator's *public* key, which lives on their LOCAL machine
 # (the one they SSH from) — not on this server. Retrieve it locally with:
 #   cat ~/.ssh/id_ed25519.pub   (or ~/.ssh/id_rsa.pub)
 # No key yet? Create one locally with `ssh-keygen -t ed25519`, then cat the .pub.
-echo ""
-echo "Paste the SSH PUBLIC key for ${NEW_USER} — from your LOCAL machine, not this server."
-echo "  Print it locally:  cat ~/.ssh/id_ed25519.pub   (or ~/.ssh/id_rsa.pub)"
-echo "  No key yet?        ssh-keygen -t ed25519   then cat the .pub file"
-echo "  Use the .pub (starts 'ssh-ed25519'/'ssh-rsa') — never the private key."
-read -rp "SSH public key: " SSH_PUBKEY
+if prompting_for SSH_PUBKEY; then
+  echo ""
+  echo "Paste the SSH PUBLIC key for ${NEW_USER} — from your LOCAL machine, not this server."
+  echo "  Print it locally:  cat ~/.ssh/id_ed25519.pub   (or ~/.ssh/id_rsa.pub)"
+  echo "  No key yet?        ssh-keygen -t ed25519   then cat the .pub file"
+  echo "  Use the .pub (starts 'ssh-ed25519'/'ssh-rsa') — never the private key."
+fi
+ask SSH_PUBKEY "SSH public key: "
 
 # The tailnet node name is an input, not a derived value — this script holds no
-# host-specific facts. Env-or-prompt, same idiom as the other inputs.
-TS_HOSTNAME="${TS_HOSTNAME:-}"
-if [[ -z "$TS_HOSTNAME" && -t 0 ]]; then
+# host-specific facts.
+if prompting_for TS_HOSTNAME; then
   echo ""
-  read -rp "Tailscale hostname (e.g. strato-box): " TS_HOSTNAME
+fi
+ask TS_HOSTNAME "Tailscale hostname (e.g. web-01): "
+
+# TS_AUTHKEY is generated in the Tailscale admin console (it is NOT a password).
+# Generate a *persistent* key with expiry disabled: this node is not disposable,
+# and an ephemeral node that drops during an outage takes the Dokploy panel with it.
+if prompting_for TS_AUTHKEY; then
+  echo ""
+  echo "Tailscale auth key — generate one in the admin console (not a password):"
+  echo "  https://login.tailscale.com/admin/settings/keys  ->  'Generate auth key'"
+  echo "  Leave 'Ephemeral' OFF and disable key expiry on the node. Starts 'tskey-auth-'."
+fi
+ask TS_AUTHKEY "Tailscale auth key (input hidden): " hidden
+
+# Mail relay credentials. The box watches what it can observe about itself while
+# alive (disk); liveness is monitored externally, off the machine.
+ask ALERT_EMAIL   "Alert / SMTP sender email (receives disk alerts): "
+ask SMTP_PASSWORD "SMTP app password for ${ALERT_EMAIL} (input hidden): " hidden
+
+# ─── Validate the inputs ─────────────────────────────────────────────────────
+# Cheap checks, but they matter more now that values can arrive from the
+# environment: an unattended run has no one watching for an obvious typo.
+
+if [[ ! "$NEW_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+  echo "ERROR: NEW_USER must be a valid Linux username: lowercase, starting with a" >&2
+  echo "       letter or underscore, at most 32 characters." >&2
+  exit 1
+fi
+
+# Catches the classic footgun of pasting the PRIVATE key, which would otherwise
+# land silently in authorized_keys and lock the operator out at the SSH test.
+if [[ ! "$SSH_PUBKEY" =~ ^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]; then
+  echo "ERROR: SSH_PUBKEY does not look like a public key. It must begin with" >&2
+  echo "       'ssh-ed25519', 'ssh-rsa', 'ecdsa-sha2-' or an 'sk-' variant." >&2
+  echo "       If it begins '-----BEGIN', that is your PRIVATE key — use the .pub." >&2
+  exit 1
 fi
 
 # Validate as a DNS label rather than letting Tailscale silently sanitise it —
@@ -68,21 +138,10 @@ if [[ ! "$TS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || ${#TS_HOSTNAME} -gt
   exit 1
 fi
 
-# TS_AUTHKEY is generated in the Tailscale admin console (it is NOT a password).
-# Generate a *persistent* key with expiry disabled: this node is not disposable,
-# and an ephemeral node that drops during an outage takes the Dokploy panel with it.
-echo ""
-echo "Tailscale auth key — generate one in the admin console (not a password):"
-echo "  https://login.tailscale.com/admin/settings/keys  ->  'Generate auth key'"
-echo "  Leave 'Ephemeral' OFF and disable key expiry on the node. Starts 'tskey-auth-'."
-read -rsp "Tailscale auth key (input hidden): " TS_AUTHKEY
-echo ""
-
-# Mail relay credentials. The box watches what it can observe about itself while
-# alive (disk); liveness is monitored externally, off the machine.
-read -rp  "Alert / SMTP sender email (receives disk alerts): " ALERT_EMAIL
-read -rsp "SMTP app password for ${ALERT_EMAIL}: " SMTP_PASSWORD
-echo ""
+if [[ "$ALERT_EMAIL" != *@*.* ]]; then
+  echo "ERROR: ALERT_EMAIL does not look like an email address: ${ALERT_EMAIL}" >&2
+  exit 1
+fi
 
 # ─── Detect public IP ────────────────────────────────────────────────────────
 
@@ -116,6 +175,33 @@ cat > /etc/systemd/journald.conf.d/size-limit.conf <<'EOF'
 SystemMaxUse=500M
 EOF
 systemctl restart systemd-journald
+
+# ─── Swap ────────────────────────────────────────────────────────────────────
+# VPS images frequently ship with no swap at all. Docker image builds spike well
+# past steady-state memory, and with no swap the OOM killer takes the build — or
+# something that matters more — with no warning and no log entry worth reading.
+# A small file is enough; swappiness 10 keeps it an overflow valve rather than a
+# paging strategy. SWAP_SIZE=0 skips this entirely.
+
+SWAP_SIZE="${SWAP_SIZE:-4G}"
+if [[ "$SWAP_SIZE" == "0" ]]; then
+  echo "Swap: SWAP_SIZE=0 — skipping."
+elif swapon --show --noheadings | grep -q .; then
+  echo "Swap: already active — leaving it alone."
+else
+  if ! fallocate -l "$SWAP_SIZE" /swapfile 2>/dev/null; then
+    # Some filesystems refuse fallocate for swap; write the file out instead.
+    dd if=/dev/zero of=/swapfile status=none \
+      bs=1M count="$(( $(numfmt --from=iec "$SWAP_SIZE") / 1048576 ))"
+  fi
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo 'vm.swappiness=10' > /etc/sysctl.d/99-swappiness.conf
+  sysctl -q -w vm.swappiness=10
+  echo "Swap: ${SWAP_SIZE} at /swapfile, swappiness 10."
+fi
 
 # ─── unattended-upgrades ─────────────────────────────────────────────────────
 
@@ -299,6 +385,16 @@ cat > /etc/cron.daily/docker-prune <<'CRON'
 #!/bin/sh
 docker image prune -f
 docker container prune -f
+
+# The BuildKit cache is what actually fills the disk on a box that builds its own
+# images, and neither prune above touches it. Docker 28 renamed the size-cap flag
+# from --keep-storage to --reserved-space; try the current name first, then the
+# old one, then fall back to an age filter if neither is understood.
+docker builder prune -f --reserved-space 5g 2>/dev/null \
+  || docker builder prune -f --keep-storage 5g 2>/dev/null \
+  || docker builder prune -f --filter until=168h
+
+# Volumes are deliberately never pruned — that is where the data lives.
 CRON
 chmod +x /etc/cron.daily/docker-prune
 
@@ -374,14 +470,25 @@ chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
 
 # ─── SSH lockdown ────────────────────────────────────────────────────────────
 # Test non-root SSH access BEFORE disabling root login.
+#
+# SSH_TEST=yes in the environment skips the pause, which is what allows an
+# unattended rehearsal run to complete. Do not set it on a box you cannot
+# afford to be locked out of: the whole point of the pause is that a human
+# proved the new key works while root login was still available.
 
-echo ""
-echo "========================================================"
-echo "IMPORTANT: Before continuing, open a NEW terminal and run:"
-echo "  ssh -i <your-key> ${NEW_USER}@${PUBLIC_IP}"
-echo "Confirm you can log in as ${NEW_USER} with sudo access."
-echo "========================================================"
-read -rp "Can you SSH in as ${NEW_USER}? [yes/no]: " SSH_TEST
+if prompting_for SSH_TEST; then
+  echo ""
+  echo "========================================================"
+  echo "IMPORTANT: Before continuing, open a NEW terminal and run:"
+  echo "  ssh -i <your-key> ${NEW_USER}@${PUBLIC_IP}"
+  echo "Confirm you can log in as ${NEW_USER} with sudo access."
+  echo "========================================================"
+elif [[ -n "${SSH_TEST:-}" ]]; then
+  echo ""
+  echo "WARNING: SSH_TEST='${SSH_TEST}' came from the environment — nobody verified" >&2
+  echo "         non-root SSH access before this lockdown." >&2
+fi
+ask SSH_TEST "Can you SSH in as ${NEW_USER}? [yes/no]: "
 
 if [[ "$SSH_TEST" != "yes" ]]; then
   echo "ERROR: Non-root SSH access not confirmed. Aborting SSH lockdown." >&2

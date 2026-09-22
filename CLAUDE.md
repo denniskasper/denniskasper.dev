@@ -1,6 +1,8 @@
 ## CLAUDE.md
 
-Open decisions, workstreams, backlog, feature ideas and platform state for the Strato box are in docs/ dashboard.html.
+This repo is a single generic bootstrap script for a Dokploy VPS. It holds no facts
+about any particular machine — every host-specific value is an input. Keep it that
+way: host facts belong in the operator's own notes, or in a site overlay.
 
 ## Git commits
 

@@ -1,232 +1,267 @@
-# denniskasper.dev
+# server-bootstrap
 
-A personal playground for experimenting with web development, self-hosted tooling, and infrastructure.
+Provisions a hardened single-node Dokploy server on a fresh Ubuntu LTS VPS:
+OS hardening, swap, Docker Swarm, Tailscale, UFW + ufw-docker, fail2ban, an SMTP
+relay for alerts, and Dokploy itself.
 
-## Server bootstrap
+It holds no facts about any particular machine. Every host-specific value is an
+input — the username, the SSH public key, the Tailscale hostname, the auth key,
+the alert mailbox. Substitute your own wherever this README shows `<angle
+brackets>`.
 
-`init-server.sh` provisions a hardened Dokploy server on a fresh Ubuntu LTS VPS
-(OS hardening, Docker Swarm, Tailscale, UFW, fail2ban, msmtp, Dokploy). It is
-generic and reusable — it holds no facts about any specific server. Every
-host-specific value is an input: the username, the SSH public key, the Tailscale
-hostname, the auth key, and the alert mailbox.
+## Contents
 
-Anything host- or owner-specific in *behaviour* (app deploy steps, owner policy)
-can live in an **optional site overlay** that the bootstrap runs near the end:
-
-- Point `SITE_INIT` at an overlay — a **URL or a local path**. It defaults to a
-  `site-init.sh` beside `init-server.sh`. If none is found it's skipped, so
-  `init-server.sh` runs standalone on any box.
-- The overlay receives `ALERT_EMAIL`, `PUBLIC_IP`, `TAILSCALE_IP`, `TS_HOSTNAME`
-  and `NEW_USER` as environment variables.
-
-**This repo ships no overlay today.** The one it used to carry held an on-box
-uptime cron and a Cloudflare tunnel connector; both are gone (see
-[Monitoring](#monitoring) and [Deploys](#deploys-ci-over-the-tailnet)), which left
-it empty. The mechanism stays as an extension point.
-
-The Dokploy panel is never exposed publicly: port 3000 is closed in UFW and only
-traffic arriving on `tailscale0` is accepted in the `DOCKER-USER` chain. The box's
-only public inbound ports are 22, 80 and 443.
-
-### Dokploy version
-
-The bootstrap installs the **latest** Dokploy release rather than a pinned one, and
-reports back the version it actually got by reading the running service's image tag.
-Dokploy's own auto-updater stays disabled (`SKIP_AUTO_UPDATE=true`) — installing the
-newest at bootstrap and letting the panel upgrade itself unattended forever after are
-separate decisions, and only the first one is taken. The trade-off: a rebuild months
-from now yields a different Dokploy than today, so the bootstrap is not
-byte-for-byte reproducible over time.
+- [`init-server.sh`](init-server.sh) — the whole bootstrap, one file.
 
 ---
 
-## Re-provisioning the server
+## Quickstart
 
-A clean wipe + rebuild of the Strato VPS (`87.106.73.236`), which hosts every
-application under `*.denniskasper.dev`. The public IP **is preserved** across a
-Strato reinstall, so DNS doesn't change. Expect the apps to be down for the
-duration; `denniskasper.com` is unaffected — it is served by Cloudflare Workers,
-not by this box.
+Run as **root** on a fresh Ubuntu LTS VPS:
 
-### 0. Gather first
-- **Tailscale auth key** — the one hard blocker (the bootstrap aborts at
-  `tailscale up` without it). Generate at <https://login.tailscale.com/admin/settings/keys>.
-  Leave **Ephemeral off** and disable key expiry on the node: this box is not
-  disposable, and a node that drops during an outage takes the Dokploy panel with it.
-  Starts `tskey-auth-`.
-- **Gmail app password** for `dennis.m.kasper@gmail.com` — see the appendix.
-  (Non-blocking: a wrong/blank one only makes alert mail WARN.)
-- **SSH public key** for `dennis` (e.g. `~/.ssh/id_ed25519.pub`).
-
-### 1. Strato — reinstall to Ubuntu 24.04 LTS
-Strato panel → **Mein Server → Neuinstallation** → **Ubuntu 24.04 LTS** → set a root
-password (or paste an SSH key) → confirm. Public IP is preserved.
-
-### 2. Bootstrap (as root)
 ```bash
-ssh root@87.106.73.236
-curl -fsSL https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/init-server.sh -o init-server.sh && \
+curl -fsSL https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/init-server.sh -o init-server.sh && \
   bash init-server.sh
 ```
-The box has no keys, no git and no `gh` — it fetches the script over HTTPS from the
-public repo, so any change to `init-server.sh` must be **pushed to `main`** before a
-rebuild. Consider pinning the URL to a commit SHA rather than `main`, so the rebuild
-runs the script you reviewed.
 
-Answer the prompts:
+A blank box has no keys, no git and no `gh`, so it fetches over plain HTTPS from
+the public repo. Anything you change here must be **pushed to `main`** before it
+can be used. Consider pinning the URL to a commit SHA rather than `main`, so a
+rebuild runs the script you reviewed rather than whatever `main` holds that day.
 
-| Prompt | Answer |
-|---|---|
-| Username | `dennis` |
-| SSH public key | your `~/.ssh/id_ed25519.pub` |
-| Tailscale hostname | `strato-box` |
-| Tailscale auth key | your persistent, non-expiring key |
-| Alert / SMTP email | `dennis.m.kasper@gmail.com` |
-| SMTP app password | your Gmail app password (appendix) |
+### Inputs
 
-The hostname is validated as a DNS label and the script exits early if it isn't one,
-rather than letting Tailscale silently sanitise it behind your back.
+Each value is taken from the environment if set, and prompted for otherwise:
 
-Before the final prompt, in a **second terminal** confirm `ssh dennis@87.106.73.236`
-works (and `sudo -v`). Only then answer **`yes`** to "Can you SSH in as dennis?" —
-that disables root login.
+| Variable | Prompt | Notes |
+|---|---|---|
+| `NEW_USER` | Username to create | validated as a Linux username |
+| `SSH_PUBKEY` | SSH public key | your **`.pub`**, from the machine you SSH *from* |
+| `TS_HOSTNAME` | Tailscale hostname | validated as a DNS label |
+| `TS_AUTHKEY` | Tailscale auth key | hidden input |
+| `ALERT_EMAIL` | Alert / SMTP sender email | receives disk alerts |
+| `SMTP_PASSWORD` | SMTP app password | hidden input; see the appendix |
+| `SSH_TEST` | the pre-lockdown confirmation | see [SSH lockdown](#ssh-lockdown) |
+| `SWAP_SIZE` | — | env only, default `4G`; `0` disables |
 
-> `init-server.sh` refuses to run where Docker volumes already exist unless
-> `--force` is passed. Harmless on a blank machine — but it does mean a failed run
-> can't simply be re-run.
+Supplying all of them lets the script run unattended, which is what makes a
+rehearsal cheap:
+
+```bash
+NEW_USER=deploy SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" \
+TS_HOSTNAME=web-01 TS_AUTHKEY=tskey-auth-… \
+ALERT_EMAIL=alerts@example.com SMTP_PASSWORD=… SSH_TEST=yes \
+  bash init-server.sh
+```
+
+**Rehearse before you rely on it.** Spin up the cheapest VPS your provider
+offers, run the script end to end, confirm the panel comes up over the tailnet,
+destroy it. It costs pennies and it is the difference between finding a mistake
+on a disposable box and finding it on one with your data on it.
+
+> **Not idempotent.** The script refuses to run where Docker volumes already
+> exist unless `--force` is passed. Harmless on a blank machine — but it does
+> mean a failed run can't simply be re-run.
+
+---
+
+## Provisioning a server
+
+### 0. Gather first
+- **Tailscale auth key** — the one hard blocker; the bootstrap aborts at
+  `tailscale up` without it. Generate at
+  <https://login.tailscale.com/admin/settings/keys>. Leave **Ephemeral off** and
+  disable key expiry on the node: a node that drops during an outage takes the
+  Dokploy panel with it. Starts `tskey-auth-`.
+- **SMTP app password** for the alert mailbox — see the appendix. Non-blocking:
+  a wrong one only makes the test mail WARN.
+- **SSH public key**, e.g. `~/.ssh/id_ed25519.pub`.
+
+### 1. Install a clean OS
+Your provider's control panel → reinstall → **Ubuntu 24.04 LTS** → set a root
+password or paste an SSH key. Check whether the public IP survives the
+reinstall; most providers preserve it, which saves a DNS change.
+
+### 2. Bootstrap
+`ssh root@<origin-ip>`, then run the [quickstart](#quickstart) command and
+answer the prompts. Values are validated as they are read, so a mistyped
+hostname or a pasted *private* key stops the run immediately rather than
+surfacing as a lockout twenty minutes later.
 
 ### 3. Dokploy admin
-Open **`http://strato-box.tailf9113a.ts.net:3000`** over Tailscale — **use this
-MagicDNS URL, not the IP.** Dokploy pins its origin to the host you first register
-at; registering via the IP breaks Tailscale-name access afterward. Create the admin
-account and enable **2FA**.
+Open **`http://<hostname>.<tailnet>.ts.net:3000`** over Tailscale — **use the
+MagicDNS name, not the IP.** Dokploy pins its origin to the host you first
+register at; registering via the IP breaks name-based access afterward. Create
+the admin account and enable **2FA**.
 
 ### 4. DNS and origin TLS
-- `*.denniskasper.dev` → `87.106.73.236`, **proxied (🟠)**.
-- A specific **grey (DNS-only)** `turn` record overrides the wildcard: coturn is
-  UDP/3478 and cannot pass through the proxy. A more specific record always wins.
-- At the origin, install a **Cloudflare Origin CA certificate** in Traefik. It is
-  free, valid 15 years, and trusted only by Cloudflare — which is all that is needed
-  behind the proxy. This replaces the Let's Encrypt DNS-01 resolver and the
-  `CF_DNS_API_TOKEN` an earlier version of this runbook called for, and removes
-  certificate renewal entirely.
+A wildcard keeps per-app DNS work at zero:
+
+- `*.<your-domain>` → `<origin-ip>`, **proxied (🟠)**.
+- Anything that can't survive the proxy needs a more specific **grey (DNS-only)**
+  record to override the wildcard — a TURN server on UDP/3478, for instance. A
+  more specific record always wins.
+- At the origin, install a **Cloudflare Origin CA certificate** in Traefik. Free,
+  valid 15 years, trusted only by Cloudflare — which is all that is needed behind
+  the proxy. It removes certificate renewal entirely, and with it the Let's
+  Encrypt DNS-01 resolver and its scoped API token.
 - Zone SSL/TLS mode: **Full (strict)**.
 
 ### 5. Deploys: CI over the tailnet
-There is **no public door** into the deployment system — no Cloudflare tunnel, no
-`cloudflared`, no `deploy.*` hostname. GitHub Actions joins the tailnet as an
-ephemeral node and POSTs to the Dokploy webhook from inside it.
+There is **no public door** into the deployment system — no tunnel, no
+`cloudflared`, no `deploy.*` hostname. CI joins the tailnet as an ephemeral node
+and POSTs to the Dokploy webhook from inside it.
 
 One-time, in Tailscale:
-- Create an **OAuth client** with the `auth_keys` scope, bound to a new ACL tag such
-  as `tag:ci`.
-- Add an ACL grant letting `tag:ci` reach `strato-box` on port **3000**, and nothing
+- Create an **OAuth client** with the `auth_keys` scope, bound to a tag such as
+  `tag:ci`.
+- Add an ACL grant letting `tag:ci` reach the node on port **3000**, and nothing
   else.
 
 Per application repo:
 - Add `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` repository secrets.
-- Add a deploy workflow that runs `tailscale/github-action`, then POSTs to that app's
-  Dokploy webhook over the tailnet.
+- Add a deploy workflow that runs `tailscale/github-action`, then POSTs to that
+  app's Dokploy webhook over the tailnet.
 
-That is the accepted price of the choice: every new application costs a workflow and
-two secrets, in exchange for the box having no public entry point beyond 22/80/443.
+That is the accepted price: every new application costs a workflow and two
+secrets, in exchange for the box having no public entry point beyond 22/80/443.
 
 ### 6. Deploy the applications
-Create each app in the Dokploy UI and give it its `*.denniskasper.dev` hostname.
+Create each app in the Dokploy UI and give it its hostname under the wildcard.
 
 > ⚠️ **Check the container's real port.** The unprivileged nginx image serves on
 > `8080`, not `80`; mapping a domain to the wrong port yields an instant
-> **`502 Bad Gateway`** (Traefik routes to a dead port).
+> **`502 Bad Gateway`** — Traefik routing to a dead port.
 
 ### 7. Cleanup
-- Delete **orphaned** Dokploy GitHub Apps in GitHub — the ones the rebuild replaced.
-  **Never delete the app a live server is using**; it breaks that server's auto-deploy.
+- Delete **orphaned** Dokploy GitHub Apps that a rebuild replaced. **Never delete
+  the app a live server is using**; it breaks that server's auto-deploy.
 - Remove any stale offline node from the Tailscale admin console.
+
+---
+
+## What the script sets up
+
+### SSH lockdown
+The run **pauses before disabling root login** and will not continue without a
+second terminal: it prints the exact `ssh` command and waits for a literal
+`yes`. Anything else aborts with root login still enabled. Only after
+confirmation does it write the hardening config — no root login, no password
+auth, keys only — validate it with `sshd -t`, and reload.
+
+`SSH_TEST=yes` in the environment skips the pause, which is what allows an
+unattended rehearsal to finish. Don't set it on a box you can't afford to be
+locked out of; the point of the pause is that a human proved the new key works
+while root was still available.
+
+### Network exposure
+Public: **22, 80, 443**. That's all.
+
+The Dokploy panel on :3000 is never exposed. UFW alone isn't enough — Docker's
+DNAT runs in `PREROUTING`, before UFW's `INPUT` chain ever sees the packet — so
+the script installs [`ufw-docker`](https://github.com/chaifeng/ufw-docker) and
+adds a rule to `/etc/ufw/after.rules` accepting traffic on the `tailscale0`
+interface inside the `DOCKER-USER` chain. Writing it to `after.rules` rather
+than calling `iptables` is what makes it survive a reboot.
+
+Once the tailnet is up and you've confirmed Tailscale SSH works, closing **22**
+as well is worth considering: it drops the public surface to 80/443 and makes
+SSH brute-forcing a non-category. Only do it with console access available.
+
+### Disk
+Three defences, because a full disk is the most common way a small box dies:
+- journald capped at **500 MB**.
+- Docker daemon log rotation (10 MB × 3), written **before** Docker first starts.
+- A daily prune of dangling images, stopped containers, **and the BuildKit
+  cache** — the last is what actually grows without bound on a box that builds
+  its own images, and the first two commands don't touch it. Volumes are
+  deliberately never pruned; that's where the data lives.
+
+Plus a cron that emails `ALERT_EMAIL` when `/` passes 80%.
+
+### Swap
+VPS images frequently ship with none. Docker builds spike well past steady-state
+memory, and with no swap the OOM killer takes the build — or something that
+matters more — with no warning worth reading. The script creates a **4 GB**
+swapfile with `vm.swappiness=10`, so it acts as an overflow valve rather than a
+paging strategy. Set `SWAP_SIZE=0` to skip, or e.g. `SWAP_SIZE=2G` to resize.
+Existing swap is left alone.
+
+### Dokploy version
+Installs the **latest** release rather than a pinned one, then reports the
+version it actually got by reading the running service's image tag. Dokploy's
+own auto-updater stays disabled (`SKIP_AUTO_UPDATE=true`): installing the newest
+at bootstrap and letting the panel upgrade itself unattended forever after are
+separate decisions, and only the first is taken here. The trade-off is that two
+rebuilds months apart give two different panels.
+
+### Site overlay (optional)
+Anything host-specific in *behaviour* — app deploy steps, owner policy — can live
+in an overlay that runs near the end, after the base system exists.
+
+- Point `SITE_INIT` at a **URL or a local path**. It defaults to a `site-init.sh`
+  beside `init-server.sh`; if nothing is found the step is skipped, so the script
+  runs standalone.
+- The overlay receives `ALERT_EMAIL`, `PUBLIC_IP`, `TAILSCALE_IP`, `TS_HOSTNAME`
+  and `NEW_USER` in its environment.
+
+This repo ships no overlay. The mechanism costs nothing and stays.
+
+### What it pulls at runtime
+Four unpinned fetches: `ufw-docker` from `master`, Docker's install script (only
+as a fallback), and two Dokploy scripts. Worth knowing if you care about
+reproducibility — it's the same reason to pin `init-server.sh` itself to a SHA.
 
 ---
 
 ## Monitoring
 
-**Liveness is monitored externally, off this machine.** A cron on the box cannot
+**Liveness has to be watched from somewhere else.** A cron on the box cannot
 report that the box is down: if the machine dies, the cron and the mail relay die
-with it. An external HTTP monitor (UptimeRobot free tier or equivalent, 5-minute
-interval) pointed at the application whose downtime actually costs something is the
-only thing that can detect a dead box.
+with it. An external HTTP monitor (UptimeRobot's free tier or equivalent,
+5-minute interval) pointed at whichever app's downtime actually costs something
+is the only thing that detects a dead box.
 
-What stays **on** the box is the disk-full alert — a condition the machine can
-observe about itself while it is alive — delivered through the msmtp relay that
-`init-server.sh` configures.
-
----
-
-## Appendix — create a Gmail app password
-App passwords are shown **once** and can't be retrieved later — generate a new one
-if you don't have it saved.
-
-1. Requires **2-Step Verification** enabled on the account.
-2. Go to <https://myaccount.google.com/apppasswords> (or Google Account → **Security**
-   → **2-Step Verification** → **App passwords**).
-3. Name it (e.g. `msmtp strato-box`) → **Create** → copy the **16-character** code
-   (drop the spaces).
-4. Use it as the SMTP password at bootstrap step 2. Host/port/user are baked in:
-   `smtp.gmail.com:587`, user = the alert email.
+What belongs **on** the box is the disk alert — a condition the machine can
+observe about itself while it's alive — delivered through the msmtp relay the
+bootstrap configures.
 
 ---
 
-## Enterprise-readiness — open notes (NOT decided, to revisit)
+## Appendix — creating a Gmail app password
+The SMTP relay is preconfigured for `smtp.gmail.com:587`. App passwords are shown
+**once** and can't be retrieved later.
 
-> Status: **undecided / parked.** Captured to pick up later *if* this setup ever needs to
-> serve real customers / carry an SLA. Today: single VPS + Dokploy + Traefik, Cloudflare in
-> front, admin Tailscale-only, CI on the tailnet. This is a solid Tier-0 setup; the notes
-> below are the path up.
+1. Requires **2-Step Verification** on the account.
+2. Go to <https://myaccount.google.com/apppasswords> (or Google Account →
+   **Security** → **2-Step Verification** → **App passwords**).
+3. Name it (e.g. `msmtp <hostname>`) → **Create** → copy the **16-character**
+   code, dropping the spaces.
+4. Use it as `SMTP_PASSWORD`. Host, port and user are derived: the user is the
+   alert email.
 
-### The ingress hardening that matters is at the origin
-Customer traffic goes Cloudflare → Traefik `:443`. With the wildcard proxied and an
-Origin CA certificate installed, the remaining gap is that the origin IP is known and
-`:80/:443` are open, so an attacker can bypass Cloudflare/WAF by hitting the IP
-directly. Options: lock the origin firewall to **Cloudflare IP ranges** + **Authenticated
-Origin Pulls** (mTLS CF→origin), or move customer traffic onto a Cloudflare Tunnel too
-(origin outbound-only). Note the deploy path is *not* part of this exposure any more —
-CI reaches Dokploy over the tailnet, and nothing about deploys is publicly reachable.
+For a different provider, change `SMTP_HOST` / `SMTP_PORT` near the top of the
+script.
 
-### Bigger gaps to close before "enterprise" (priority order)
-1. **Backups / DR — currently none.** Automated off-box DB backups (S3/R2) + a *tested* restore
-   runbook; move stateful apps to **managed Postgres** (PITR, failover).
-2. **HA / single-VPS SPOF.** One box runs Traefik + apps + Dokploy + Postgres; its death = full
-   outage. Multi-node Swarm (Dokploy supports worker nodes) or a managed platform behind a load
-   balancer; ≥2 app nodes across AZs.
-3. **Observability / on-call.** Today: an external HTTP monitor plus the on-box disk alert. Add
-   multi-region probes + escalation (PagerDuty/Opsgenie), metrics/logs, alerts on
-   error-rate/latency/cert expiry/disk. (Note the known "Dokploy healthcheck green but UI 500"
-   failure mode — needs end-to-end probing, not just a port check.)
-4. **Secrets management.** Pasted into the Dokploy UI today (not auditable; lose Dokploy =
-   regenerate everything). Move to Vault / Doppler / Infisical / a cloud secrets manager with
-   rotation + audit.
-5. **Release safety.** A true staging mirror, migration gates, blue-green/canary, easy rollback.
-   There is one box; there is no prod-parity staging.
-6. **Compliance** (only if customers demand SOC2 / ISO / GDPR): audit logs, access control,
-   change management, incident-response plan, DPA, data residency.
-7. **Scale.** Fixed CPU/RAM on one VPS; enterprise load needs horizontal scale + autoscale + LB.
-8. **Reproducible bootstrap.** Dokploy is installed unpinned, so two rebuilds months apart give
-   two different panels. Re-pinning is a one-line change if that ever matters.
+---
 
-### What's already good (keep)
-Reproducible `init-server.sh` (IaC foundation) with every host fact as an input; Dokploy's
-auto-updater disabled; **admin plane and deploy path both off the public internet**;
-Cloudflare front (DDoS / WAF / TLS) with an Origin CA cert that never needs renewing;
-hardened host (UFW, fail2ban, key-only SSH, no root, unattended security upgrades);
-liveness monitored from outside the box.
+## Known gaps
 
-### Maturity ladder
-- **Tier 0 (today):** portfolio + low-stakes apps (few users, no SLA, no sensitive data).
-- **Tier 1 (first paying customers):** off-box backups + tested restore, external monitoring +
-  on-call, managed Postgres, a real staging env.
-- **Tier 2 (enterprise SLAs):** multi-node HA + LB across AZs, managed DB w/ failover + PITR,
-  secrets manager, full observability, Terraform + GitOps, DR plan with RTO/RPO targets, origin
-  locked to Cloudflare, compliance program.
+Deliberately out of scope, listed so they aren't mistaken for oversights:
 
-### To answer when we pick this up
-- Stateful app with customer data, or stateless-at-scale? (decides whether backups/DB or HA/CDN dominate)
-- Target SLA / acceptable downtime?
-- Data sensitivity / compliance (PII, payments, SOC2)?
-- Expected load / growth curve?
+- **No backups.** Databases, `/etc/dokploy` (every app definition and
+  environment variable) and the secrets held in the Dokploy UI all live only on
+  this box. Set up off-box backups separately — and restore one at least once.
+- **Single node.** Traefik, apps, Dokploy and any database share one machine;
+  its death is a full outage.
+- **Origin reachable directly.** With a proxied wildcard, the origin IP is still
+  public and `:80/:443` are open, so Cloudflare's WAF can be bypassed by
+  connecting to the IP. Restricting those ports to Cloudflare's published ranges
+  closes it.
+- **Secrets live in the Dokploy UI.** Not auditable, and losing Dokploy means
+  regenerating everything.
+- **No staging.** One box, no prod-parity mirror.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
