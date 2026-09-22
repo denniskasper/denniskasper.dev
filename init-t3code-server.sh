@@ -120,6 +120,7 @@ git config --global init.defaultBranch main
 
 command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash
 command -v codex  >/dev/null 2>&1 || curl -fsSL https://chatgpt.com/codex/install.sh | sh
+command -v grok   >/dev/null 2>&1 || curl -fsSL https://x.ai/cli/install.sh | bash
 
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -169,13 +170,15 @@ tailscale serve status
 
 cat <<EOF
 
-Three logins still need a human and a second device:
+Four logins still need a human and a second device:
 
   gh auth login     # HTTPS, and yes to authenticating git
   claude            # sign in
   codex             # choose "Sign in with Device Code" — the ChatGPT option
                     # starts a callback server on this machine's loopback, which
                     # a browser elsewhere cannot reach without an SSH tunnel
+  grok              # same constraint: prefer a device-code flow over anything
+                    # that wants to open a browser here
 
 Then pair a client:
 
