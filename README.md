@@ -12,6 +12,10 @@ brackets>`.
 ## Contents
 
 - [`init-server.sh`](init-server.sh) — the whole bootstrap, one file.
+- [`init-t3code-server.sh`](init-t3code-server.sh) — installs a T3 Code server on a
+  machine the bootstrap has already provisioned, published over Tailscale Serve.
+  Run as the user who will own it, **after** the bootstrap, never during it: it
+  creates a systemd *user* service and three of its logins need a human.
 
 ---
 
