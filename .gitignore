@@ -15,3 +15,10 @@ docs/dashboard.html
 .env.*
 !.env.example
 !.env.*.example
+
+# Not part of the bootstrap. Kept locally, never published:
+#   ai-factory/ — a retired stack from the Hetzner box, due to be deleted with it
+#   docs/adr/   — ADRs describing the two-server topology ADR-0001 retired, and
+#                 carrying host facts this repo was deliberately stripped of
+ai-factory/
+docs/
