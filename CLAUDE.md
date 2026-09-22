@@ -1,6 +1,6 @@
 ## CLAUDE.md
 
-Open decisions, workstreams, backlog, feature ideas and platform state for the integration + production servers are in docs/ dashboard.html.
+Open decisions, workstreams, backlog, feature ideas and platform state for the Strato box are in docs/ dashboard.html.
 
 ## Git commits
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Generic Dokploy server bootstrap — hardens a fresh Ubuntu LTS VPS and installs
 # Docker Swarm + Dokploy. Holds no host- or owner-specific facts; anything tied
-# to a particular server (which apps to monitor, deploy reminders, etc.) lives
-# in an optional site overlay — see the "Site-specific overlay" section.
+# to a particular server (app deploy steps, owner policy, etc.) lives in an
+# optional site overlay — see the "Site-specific overlay" section. This repo
+# ships no overlay; the extension point stays for whoever needs one.
 # Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS VPS)
-# Quickstart (fetch + run from main, with this repo's overlay):
+# Quickstart (fetch + run from main):
 #   curl -fsSL https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/init-server.sh -o init-server.sh && \
-#     SITE_INIT=https://raw.githubusercontent.com/denniskasper/denniskasper.dev/main/site-init.sh bash init-server.sh
+#     bash init-server.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DOKPLOY_VERSION="v0.29.4"
 SMTP_HOST="smtp.gmail.com"
 SMTP_PORT="587"
 UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/master/ufw-docker"
@@ -52,34 +52,37 @@ echo "  No key yet?        ssh-keygen -t ed25519   then cat the .pub file"
 echo "  Use the .pub (starts 'ssh-ed25519'/'ssh-rsa') — never the private key."
 read -rp "SSH public key: " SSH_PUBKEY
 
-# Roles: 'int' = integration (a non-prod server; sends no mail) · 'prod' =
-# production (mail relay + uptime/disk alerts). 'dev' now means local development
-# only — no server — so it is intentionally not a valid role here.
-read -rp "Server role [int|prod]: " SERVER_ROLE
+# The tailnet node name is an input, not a derived value — this script holds no
+# host-specific facts. Env-or-prompt, same idiom as the other inputs.
+TS_HOSTNAME="${TS_HOSTNAME:-}"
+if [[ -z "$TS_HOSTNAME" && -t 0 ]]; then
+  echo ""
+  read -rp "Tailscale hostname (e.g. strato-box): " TS_HOSTNAME
+fi
 
-if [[ "$SERVER_ROLE" != "int" && "$SERVER_ROLE" != "prod" ]]; then
-  echo "ERROR: role must be 'int' or 'prod'" >&2
+# Validate as a DNS label rather than letting Tailscale silently sanitise it —
+# a surprise rename breaks the MagicDNS URL this script prints at the end.
+if [[ ! "$TS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || ${#TS_HOSTNAME} -gt 63 ]]; then
+  echo "ERROR: Tailscale hostname must be a DNS label: lowercase a-z, 0-9 and '-'," >&2
+  echo "       not starting or ending with '-', at most 63 characters." >&2
   exit 1
 fi
 
 # TS_AUTHKEY is generated in the Tailscale admin console (it is NOT a password).
-# Generate an *ephemeral* key so the node auto-removes when it goes offline:
-#   https://login.tailscale.com/admin/settings/keys  →  "Generate auth key"
+# Generate a *persistent* key with expiry disabled: this node is not disposable,
+# and an ephemeral node that drops during an outage takes the Dokploy panel with it.
 echo ""
 echo "Tailscale auth key — generate one in the admin console (not a password):"
 echo "  https://login.tailscale.com/admin/settings/keys  ->  'Generate auth key'"
-echo "  Enable 'Ephemeral' so this node auto-removes when offline. Starts 'tskey-auth-'."
+echo "  Leave 'Ephemeral' OFF and disable key expiry on the node. Starts 'tskey-auth-'."
 read -rsp "Tailscale auth key (input hidden): " TS_AUTHKEY
 echo ""
 
-# Mail relay credentials — prod only. Int sends no mail, so none are collected.
-ALERT_EMAIL=""
-SMTP_PASSWORD=""
-if [[ "$SERVER_ROLE" == "prod" ]]; then
-  read -rp  "Alert / SMTP sender email (receives disk + uptime alerts): " ALERT_EMAIL
-  read -rsp "SMTP app password for ${ALERT_EMAIL}: " SMTP_PASSWORD
-  echo ""
-fi
+# Mail relay credentials. The box watches what it can observe about itself while
+# alive (disk); liveness is monitored externally, off the machine.
+read -rp  "Alert / SMTP sender email (receives disk alerts): " ALERT_EMAIL
+read -rsp "SMTP app password for ${ALERT_EMAIL}: " SMTP_PASSWORD
+echo ""
 
 # ─── Detect public IP ────────────────────────────────────────────────────────
 
@@ -99,10 +102,7 @@ apt-get install -yq \
   ufw fail2ban \
   systemd-timesyncd
 
-# Mail relay packages only on prod — int sends no email.
-if [[ "$SERVER_ROLE" == "prod" ]]; then
-  apt-get install -yq msmtp msmtp-mta mailutils
-fi
+apt-get install -yq msmtp msmtp-mta mailutils
 
 # Strip orphaned packages and cached archives for a clean baseline.
 apt-get autoremove -yq
@@ -180,21 +180,23 @@ docker swarm init --advertise-addr "${PUBLIC_IP}"
 # ─── Tailscale ───────────────────────────────────────────────────────────────
 
 curl -fsSL https://tailscale.com/install.sh | sh
-# Deterministic node name → predictable MagicDNS URL (dokploy-int / dokploy-prod)
-# instead of the cloud's default hostname; the ephemeral node re-registers cleanly.
-tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="dokploy-${SERVER_ROLE}"
+# Deterministic node name → predictable MagicDNS URL instead of the cloud image's
+# default hostname.
+tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="${TS_HOSTNAME}"
 TAILSCALE_IP=$(tailscale ip -4)
 echo "Tailscale IP: ${TAILSCALE_IP}"
 
-# ─── Dokploy (pinned version) ────────────────────────────────────────────────
+# ─── Dokploy (latest release) ────────────────────────────────────────────────
 
-echo "Installing Dokploy ${DOKPLOY_VERSION}..."
+echo "Installing the latest Dokploy release..."
 
 # Download and inspect Dokploy install script before running
 DOKPLOY_INSTALL_SCRIPT=$(mktemp)
 curl -fsSL "https://dokploy.com/install.sh" -o "${DOKPLOY_INSTALL_SCRIPT}"
-# Pin the version via environment variable that Dokploy's install.sh respects
-DOKPLOY_VERSION="${DOKPLOY_VERSION}" bash "${DOKPLOY_INSTALL_SCRIPT}"
+# DOKPLOY_VERSION is left unset on purpose — install.sh then takes the newest
+# release. The trade-off: a rebuild months from now yields a different Dokploy,
+# so this bootstrap is not byte-for-byte reproducible over time.
+bash "${DOKPLOY_INSTALL_SCRIPT}"
 rm -f "${DOKPLOY_INSTALL_SCRIPT}"
 
 # Apply Docker Secrets migration (removes legacy hardcoded postgres password)
@@ -204,10 +206,22 @@ curl -fsSL "https://dokploy.com/security/0.26.6.sh" -o "${DOKPLOY_SEC_SCRIPT}"
 bash "${DOKPLOY_SEC_SCRIPT}"
 rm -f "${DOKPLOY_SEC_SCRIPT}"
 
-# Disable Dokploy's built-in auto-updater so version stays pinned
+# Disable Dokploy's built-in auto-updater. "Install the latest at bootstrap" and
+# "let Dokploy upgrade itself unattended forever after" are separate decisions;
+# panel upgrades stay deliberate.
 docker service update \
   --env-add SKIP_AUTO_UPDATE=true \
   dokploy 2>/dev/null || true
+
+# Report what actually got installed, read back from the running service's image
+# tag — there is no constant to echo any more.
+DOKPLOY_IMAGE=$(docker service inspect dokploy \
+  --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || true)
+DOKPLOY_IMAGE="${DOKPLOY_IMAGE%%@*}"          # drop any @sha256: digest
+DOKPLOY_VERSION="${DOKPLOY_IMAGE##*:}"        # tag after the last colon
+if [[ -z "$DOKPLOY_VERSION" || "$DOKPLOY_VERSION" == "$DOKPLOY_IMAGE" ]]; then
+  DOKPLOY_VERSION="unknown (could not read the dokploy service image tag)"
+fi
 
 # ─── UFW + ufw-docker ────────────────────────────────────────────────────────
 
@@ -254,9 +268,7 @@ systemctl enable --now fail2ban
 
 # ─── msmtp (SMTP relay) ──────────────────────────────────────────────────────
 
-# Prod only — int sends no email (no SMTP relay configured).
-if [[ "$SERVER_ROLE" == "prod" ]]; then
-  cat > /etc/msmtprc <<EOF
+cat > /etc/msmtprc <<EOF
 defaults
 auth           on
 tls            on
@@ -272,15 +284,14 @@ password       ${SMTP_PASSWORD}
 
 account default : smtp
 EOF
-  chmod 600 /etc/msmtprc
+chmod 600 /etc/msmtprc
 
-  # Route system mail through msmtp
-  ln -sf /usr/bin/msmtp /usr/sbin/sendmail
+# Route system mail through msmtp
+ln -sf /usr/bin/msmtp /usr/sbin/sendmail
 
-  # Test mail delivery
-  echo "Subject: init-server.sh — mail test from $(hostname)" \
-    | msmtp "${ALERT_EMAIL}" || echo "WARN: test mail failed, check /var/log/msmtp.log"
-fi
+# Test mail delivery
+echo "Subject: init-server.sh — mail test from $(hostname)" \
+  | msmtp "${ALERT_EMAIL}" || echo "WARN: test mail failed, check /var/log/msmtp.log"
 
 # ─── Disk hygiene cron ───────────────────────────────────────────────────────
 
@@ -291,23 +302,23 @@ docker container prune -f
 CRON
 chmod +x /etc/cron.daily/docker-prune
 
-# Disk-full email alert — prod only (int: no email; owner watches disk manually).
-if [[ "$SERVER_ROLE" == "prod" ]]; then
-  cat > /etc/cron.d/disk-alert <<CRON
+# Disk-full email alert. A condition the box can observe about itself while it is
+# alive — unlike liveness, which is monitored externally.
+cat > /etc/cron.d/disk-alert <<CRON
 */5 * * * * root \
   USED=\$(df / --output=pcent | tail -1 | tr -d ' %'); \
   [ "\$USED" -gt 80 ] && echo "Disk usage on \$(hostname) is \${USED}%%" \
     | mail -s "ALERT: disk > 80%% on \$(hostname)" ${ALERT_EMAIL}
 CRON
-fi
 
 # ─── Site-specific overlay (optional) ────────────────────────────────────────
-# Everything tied to a *particular* server — which URLs to monitor, app deploy
-# steps, owner-specific policy — is kept OUT of this generic bootstrap. Point at
+# Everything tied to a *particular* server — app deploy steps, owner-specific
+# policy — is kept OUT of this generic bootstrap. Point at
 # an overlay with SITE_INIT (a URL or a local path); it defaults to a site-init.sh
-# next to this script — present on a repo clone, absent on a single-file curl.
+# next to this script. This repo ships no overlay, so the default finds nothing and
+# the step is skipped — the extension point costs nothing and stays.
 # The overlay runs here, after the base system is in place, receiving
-# SERVER_ROLE/ALERT_EMAIL/PUBLIC_IP/TAILSCALE_IP/NEW_USER. See site-init.example.sh.
+# ALERT_EMAIL/PUBLIC_IP/TAILSCALE_IP/TS_HOSTNAME/NEW_USER.
 
 SITE_INIT="${SITE_INIT:-${SCRIPT_DIR}/site-init.sh}"
 
@@ -329,10 +340,10 @@ run_site_overlay() {
   fi
 
   echo "Running site overlay: ${src}"
-  SERVER_ROLE="$SERVER_ROLE" \
   ALERT_EMAIL="$ALERT_EMAIL" \
   PUBLIC_IP="$PUBLIC_IP" \
   TAILSCALE_IP="$TAILSCALE_IP" \
+  TS_HOSTNAME="$TS_HOSTNAME" \
   NEW_USER="$NEW_USER" \
     bash "$script"
 
@@ -394,14 +405,14 @@ systemctl reload sshd
 
 echo ""
 echo "=== Bootstrap complete ==="
-echo "Server role      : ${SERVER_ROLE}"
+echo "Tailscale host   : ${TS_HOSTNAME}"
 echo "Public IP        : ${PUBLIC_IP}"
 echo "Tailscale IP     : ${TAILSCALE_IP}"
 echo "Dokploy version  : ${DOKPLOY_VERSION}"
 echo ""
 echo "Next steps:"
-echo "  1. Open the Dokploy admin UI via Tailscale: http://dokploy-${SERVER_ROLE}.<tailnet>.ts.net:3000"
+echo "  1. Open the Dokploy admin UI via Tailscale: http://${TS_HOSTNAME}.<tailnet>.ts.net:3000"
 echo "  2. Create the admin account and enable 2FA."
-echo "  3. Deploy your apps (host-specific steps live in your site overlay)."
+echo "  3. Deploy your apps from the Dokploy UI."
 echo ""
 echo "Root login is now disabled. Use: ssh ${NEW_USER}@${PUBLIC_IP}"
