@@ -12,9 +12,6 @@ brackets>`.
 ## Contents
 
 - [`init-server.sh`](init-server.sh) — the whole bootstrap, one file.
-- [`traefik-firewall-sync.sh`](traefik-firewall-sync.sh) — keeps the firewall
-  pointed at Traefik's current address. Installed by the bootstrap; see
-  [Keeping UFW pointed at Traefik](#keeping-ufw-pointed-at-traefik).
 
 ---
 
@@ -171,33 +168,31 @@ Once the tailnet is up and you've confirmed Tailscale SSH works, closing **22**
 as well is worth considering: it drops the public surface to 80/443 and makes
 SSH brute-forcing a non-category. Only do it with console access available.
 
-### Keeping UFW pointed at Traefik
-The two `ufw-docker allow` rules are pinned to the address the Traefik container
-has *at that moment*. Dokploy recreates that container on updates, and whenever
-Traefik's environment or ports change in the panel — and it can come back on a
-different address. When that happens every public site on the server **times
-out**, while the panel keeps answering over Tailscale, which makes it look like
-a routing or DNS fault rather than a firewall one.
+### Why the firewall rules name ports, not containers
+`ufw-docker` is installed because Docker otherwise bypasses UFW entirely: its DNAT
+runs in `PREROUTING`, before UFW's `INPUT` chain sees the packet.
 
-`ufw-docker allow dokploy-traefik 80` cannot repair it either: it only knows the
-networks `docker inspect` lists, and a container attached to an overlay network
-alone has its published ports forwarded through `docker_gwbridge`, which is not
-among them.
+The usual way to then open a port is `ufw-docker allow dokploy-traefik 80`, which
+writes a rule naming that container's **current address**. Those addresses are not
+stable — Dokploy recreates Traefik on updates and on any change to its environment or
+ports, and it can come back on a different one. The rule then matches nothing and
+every public site times out, while the tailnet keeps answering, so it reads as a DNS
+or routing fault rather than a firewall one. `ufw-docker allow` cannot repair it
+either: it only knows the networks `docker inspect` lists, and a container attached to
+an overlay network alone publishes through `docker_gwbridge`, which is not among them.
 
-[`traefik-firewall-sync.sh`](traefik-firewall-sync.sh) asks the one source that
-cannot be wrong — Docker's own DNAT rules — where 80 and 443 actually go, and
-makes UFW agree. `init-server.sh` installs it with a systemd timer that runs it
-every minute. It is idempotent, and only ever removes rules it added itself,
-recognised by their comment.
+So the bootstrap names the **port** instead:
 
-On a server bootstrapped before it existed:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/traefik-firewall-sync.sh \
-  -o /tmp/traefik-firewall-sync.sh
-sudo bash /tmp/traefik-firewall-sync.sh --check     # says what it would change
-sudo bash /tmp/traefik-firewall-sync.sh --install
 ```
+ufw route allow proto tcp from any to any port 80
+ufw route allow proto tcp from any to any port 443
+```
+
+Only one container can publish a given host port, so "allow forwarded traffic to port
+80" is "allow whatever serves port 80" — Traefik, by construction rather than by
+configuration. Nothing has to be re-checked after a recreation, and there is no timer
+and no repair script. A container publishing any other port is still blocked, which is
+what `ufw-docker` is there for.
 
 ### Disk
 Three defences, because a full disk is the most common way a small box dies:
@@ -239,7 +234,7 @@ in an overlay that runs near the end, after the base system exists.
 This repo ships no overlay. The mechanism costs nothing and stays.
 
 ### What it pulls at runtime
-Seven fetches, none pinned to a version or a digest:
+Six fetches, none pinned to a version or a digest:
 
 | Fetched | When |
 |---|---|
@@ -248,7 +243,6 @@ Seven fetches, none pinned to a version or a digest:
 | `dokploy.com/install.sh` | always |
 | `dokploy.com/security/0.26.6.sh` | always |
 | `ufw-docker`, from `master` | always |
-| `traefik-firewall-sync.sh`, from `main` | only when not sitting beside the script |
 | `get.docker.com` | only if the apt repo install fails |
 
 (Plus a site overlay, if `SITE_INIT` ever points at one. None ships.)

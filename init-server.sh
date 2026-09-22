@@ -18,7 +18,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMTP_HOST="smtp.gmail.com"
 SMTP_PORT="587"
 UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/master/ufw-docker"
-TRAEFIK_FIREWALL_SYNC_URL="https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/traefik-firewall-sync.sh"
 
 # ─── Safety check ────────────────────────────────────────────────────────────
 
@@ -329,9 +328,24 @@ curl -fsSL "${UFW_DOCKER_URL}" -o /usr/local/bin/ufw-docker
 chmod +x /usr/local/bin/ufw-docker
 ufw-docker install
 
-# Allow Traefik to receive external HTTP/HTTPS traffic (required for Let's Encrypt HTTP-01 challenge)
-ufw-docker allow dokploy-traefik 80
-ufw-docker allow dokploy-traefik 443
+# Let external HTTP/HTTPS through to whatever container publishes those ports.
+#
+# The obvious form of this is `ufw-docker allow dokploy-traefik 80`, which writes a
+# rule naming the container's current address. Those addresses are not stable: Dokploy
+# recreates dokploy-traefik on updates and on any change to its environment or ports,
+# and it can come back on a different one. The rule then matches nothing, every public
+# site times out, and the tailnet keeps answering — so it reads as a DNS or routing
+# fault rather than a firewall one. `ufw-docker allow` cannot even repair it, because
+# it only knows the networks `docker inspect` lists, and a container attached to an
+# overlay network alone publishes through docker_gwbridge, which is not among them.
+#
+# Naming the port instead of the container removes the failure entirely. Only one
+# container can publish a given host port, so "allow forwarded traffic to port 80" is
+# "allow whatever serves port 80" — Traefik, by construction rather than by
+# configuration. A container publishing anything else is still blocked, which is what
+# ufw-docker is installed for.
+ufw route allow proto tcp from any to any port 80  comment "HTTP to whatever publishes it"
+ufw route allow proto tcp from any to any port 443 comment "HTTPS to whatever publishes it"
 
 # Allow the Dokploy admin UI (port 3000) to be reached over Tailscale only.
 # ufw-docker blocks Swarm-published ports by default, and a plain `ufw allow`
@@ -342,17 +356,6 @@ ufw-docker allow dokploy-traefik 443
 sed -i '/^-A DOCKER-USER -j ufw-user-forward$/a -A DOCKER-USER -i tailscale0 -j ACCEPT' /etc/ufw/after.rules
 
 systemctl restart ufw
-
-# The two `ufw-docker allow` rules above are pinned to the address Traefik has today. Dokploy
-# recreates that container on updates and whenever Traefik's environment or ports are changed in
-# the panel, it can come back with another address, and every public site then times out. The sync
-# script re-reads where Docker forwards 80 and 443 and keeps the rules in step, every minute.
-if [[ -f "${SCRIPT_DIR}/traefik-firewall-sync.sh" ]]; then
-  cp "${SCRIPT_DIR}/traefik-firewall-sync.sh" /tmp/traefik-firewall-sync.sh
-else
-  curl -fsSL "${TRAEFIK_FIREWALL_SYNC_URL}" -o /tmp/traefik-firewall-sync.sh
-fi
-bash /tmp/traefik-firewall-sync.sh --install
 
 # ─── fail2ban ────────────────────────────────────────────────────────────────
 
