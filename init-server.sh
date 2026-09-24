@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Generic Dokploy server bootstrap — hardens a fresh Ubuntu LTS VPS and installs
-# Docker Swarm + Dokploy. Holds no host- or owner-specific facts; anything tied
+# Generic Dokploy server bootstrap — hardens a fresh Ubuntu LTS machine and installs
+# Docker Swarm + Dokploy, or (DOKPLOY_REMOTE=1) prepares it as a remote server for a
+# Dokploy that runs elsewhere. Holds no host- or owner-specific facts; anything tied
 # to a particular server (app deploy steps, owner policy, etc.) lives in an
 # optional site overlay — see the "Site-specific overlay" section. This repo
 # ships no overlay; the extension point stays for whoever needs one.
-# Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS VPS)
+# Usage: bash init-server.sh [--force]   (run as root on a fresh Ubuntu LTS machine)
 # Quickstart (fetch + run from main):
 #   curl -fsSL https://raw.githubusercontent.com/denniskasper/server-bootstrap/main/init-server.sh -o init-server.sh && \
 #     bash init-server.sh
@@ -43,6 +44,21 @@ fi
 #
 #   NEW_USER  SSH_PUBKEY  TS_HOSTNAME  TS_AUTHKEY  ALERT_EMAIL  SMTP_PASSWORD
 #   SSH_TEST  (the pre-lockdown confirmation — see "SSH lockdown")
+#
+# Two optional inputs describe the machine rather than its owner. Each is one
+# independent fact, so they are two switches rather than one "kind of machine":
+#
+#   DOKPLOY_REMOTE=1  Another machine's Dokploy manages this one as a remote server.
+#                     No Dokploy here — Dokploy's own server setup installs what it
+#                     needs over SSH. Swarm is initialised on the tailnet address,
+#                     which Dokploy's setup would get wrong behind NAT. No
+#                     Tailscale SSH, so that SSH is answered by sshd with Dokploy's key.
+#   LAN_CIDR=<cidr>   The machine sits on a private network with no public address
+#                     (e.g. behind a NAT router). Nothing is opened publicly: SSH
+#                     is allowed from this network and the tailnet only, and no public
+#                     IP is looked up.
+#
+# Left unset, both describe a public VPS running its own Dokploy — the original case.
 #
 # With no terminal to prompt on, a missing value is a named error rather than a
 # read that blocks forever.
@@ -145,6 +161,20 @@ if [[ "$ALERT_EMAIL" != *@*.* ]]; then
   exit 1
 fi
 
+DOKPLOY_REMOTE="${DOKPLOY_REMOTE:-0}"
+if [[ "$DOKPLOY_REMOTE" != 0 && "$DOKPLOY_REMOTE" != 1 ]]; then
+  echo "ERROR: DOKPLOY_REMOTE must be 0 or 1, not '${DOKPLOY_REMOTE}'." >&2
+  exit 1
+fi
+
+# The firewall rule is written from this value, so a typo would open SSH to the
+# wrong network or fail halfway through the firewall section.
+LAN_CIDR="${LAN_CIDR:-}"
+if [[ -n "$LAN_CIDR" && ! "$LAN_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+  echo "ERROR: LAN_CIDR must be an IPv4 network like 192.168.1.0/24, not '${LAN_CIDR}'." >&2
+  exit 1
+fi
+
 # ─── Hostname ────────────────────────────────────────────────────────────────
 # Cloud images ship a generic name — "ubuntu" on most of them — which makes every
 # alert mail and every `docker node ls` ambiguous the moment there is more than
@@ -168,8 +198,17 @@ echo "Hostname: ${TS_HOSTNAME}"
 
 # Prefer IPv4 — Swarm advertise-addr and the SSH-test hint need a v4 address that
 # clients can actually reach; fall back to whatever curl returns on a v6-only host.
-PUBLIC_IP=$(curl -4 -fsS --retry 3 ifconfig.me 2>/dev/null || curl -fsS --retry 3 ifconfig.me)
-echo "Detected public IP: ${PUBLIC_IP}"
+# On a private network the public address is the router's: it reaches nothing on this
+# machine, so it is not looked up. SSH_ADDR is what the operator connects to, either way.
+if [[ -n "$LAN_CIDR" ]]; then
+  PUBLIC_IP=""
+  SSH_ADDR=$(hostname -I | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.' || true)
+  echo "Private network (${LAN_CIDR}) — no public IP. LAN address: ${SSH_ADDR}"
+else
+  PUBLIC_IP=$(curl -4 -fsS --retry 3 ifconfig.me 2>/dev/null || curl -fsS --retry 3 ifconfig.me)
+  SSH_ADDR="$PUBLIC_IP"
+  echo "Detected public IP: ${PUBLIC_IP}"
+fi
 
 # ─── System updates ──────────────────────────────────────────────────────────
 
@@ -282,65 +321,103 @@ systemctl enable --now docker
 
 # ─── Docker Swarm ─────────────────────────────────────────────────────────────
 
-docker swarm init --advertise-addr "${PUBLIC_IP}"
+# A remote server's Swarm is initialised after Tailscale, on the tailnet address — see
+# "Swarm for a remote server" below.
+if [[ "$DOKPLOY_REMOTE" == 1 ]]; then
+  echo "Swarm: DOKPLOY_REMOTE=1 — initialised on the tailnet address after Tailscale."
+else
+  docker swarm init --advertise-addr "${PUBLIC_IP:-$SSH_ADDR}"
+fi
 
 # ─── Tailscale ───────────────────────────────────────────────────────────────
 
 curl -fsSL https://tailscale.com/install.sh | sh
 # Deterministic node name → predictable MagicDNS URL instead of the cloud image's
 # default hostname.
-tailscale up --authkey="${TS_AUTHKEY}" --ssh --hostname="${TS_HOSTNAME}"
+#
+# Tailscale SSH answers port 22 on the tailnet address itself, authenticating by tailnet
+# identity instead of the key in authorized_keys. A remote server is reached by Dokploy
+# over exactly that address with its own SSH key, which Tailscale SSH would never
+# consult — so a remote server leaves SSH to sshd.
+TS_SSH_FLAG="--ssh"
+[[ "$DOKPLOY_REMOTE" == 1 ]] && TS_SSH_FLAG=""
+tailscale up --authkey="${TS_AUTHKEY}" ${TS_SSH_FLAG} --hostname="${TS_HOSTNAME}"
 TAILSCALE_IP=$(tailscale ip -4)
 echo "Tailscale IP: ${TAILSCALE_IP}"
 
+# ─── Swarm for a remote server ───────────────────────────────────────────────
+# Dokploy's server setup would initialise Swarm itself, advertising whatever public IP
+# ifconfig.io reports. Behind a NAT router that is the router's address, which is not
+# on this machine, and `docker swarm init` refuses it — setup stops there. (Its error
+# suggests ADVERTISE_ADDR; the setup script never reads it.) It skips the step when
+# Swarm is already active, so do it here, on the address Dokploy reaches the machine
+# on. Verified against Dokploy v0.30.7, 2026-09-24.
+if [[ "$DOKPLOY_REMOTE" == 1 ]]; then
+  docker swarm init --advertise-addr "${TAILSCALE_IP}"
+fi
+
 # ─── Dokploy (latest release) ────────────────────────────────────────────────
 
-echo "Installing the latest Dokploy release..."
+# A remote server gets no Dokploy of its own: the managing Dokploy installs what it
+# needs over SSH when the server is added to it.
+if [[ "$DOKPLOY_REMOTE" == 1 ]]; then
+  DOKPLOY_VERSION="none (remote server — managed by another machine's Dokploy)"
+  echo "Dokploy: DOKPLOY_REMOTE=1 — not installed here."
+else
+  echo "Installing the latest Dokploy release..."
 
-# To a temp file rather than piped into bash, so a stopped run leaves something
-# readable on disk. Nothing here inspects it automatically — do that yourself if
-# you care, by fetching the URL before running this script.
-DOKPLOY_INSTALL_SCRIPT=$(mktemp)
-curl -fsSL "https://dokploy.com/install.sh" -o "${DOKPLOY_INSTALL_SCRIPT}"
-# DOKPLOY_VERSION is left unset on purpose — install.sh then takes the newest
-# release. The trade-off: a rebuild months from now yields a different Dokploy,
-# so this bootstrap is not byte-for-byte reproducible over time.
-bash "${DOKPLOY_INSTALL_SCRIPT}"
-rm -f "${DOKPLOY_INSTALL_SCRIPT}"
+  # To a temp file rather than piped into bash, so a stopped run leaves something
+  # readable on disk. Nothing here inspects it automatically — do that yourself if
+  # you care, by fetching the URL before running this script.
+  DOKPLOY_INSTALL_SCRIPT=$(mktemp)
+  curl -fsSL "https://dokploy.com/install.sh" -o "${DOKPLOY_INSTALL_SCRIPT}"
+  # DOKPLOY_VERSION is left unset on purpose — install.sh then takes the newest
+  # release. The trade-off: a rebuild months from now yields a different Dokploy,
+  # so this bootstrap is not byte-for-byte reproducible over time.
+  bash "${DOKPLOY_INSTALL_SCRIPT}"
+  rm -f "${DOKPLOY_INSTALL_SCRIPT}"
 
-# Apply Docker Secrets migration (removes legacy hardcoded postgres password)
-echo "Applying Dokploy Docker Secrets fix..."
-DOKPLOY_SEC_SCRIPT=$(mktemp)
-curl -fsSL "https://dokploy.com/security/0.26.6.sh" -o "${DOKPLOY_SEC_SCRIPT}"
-bash "${DOKPLOY_SEC_SCRIPT}"
-rm -f "${DOKPLOY_SEC_SCRIPT}"
+  # Apply Docker Secrets migration (removes legacy hardcoded postgres password)
+  echo "Applying Dokploy Docker Secrets fix..."
+  DOKPLOY_SEC_SCRIPT=$(mktemp)
+  curl -fsSL "https://dokploy.com/security/0.26.6.sh" -o "${DOKPLOY_SEC_SCRIPT}"
+  bash "${DOKPLOY_SEC_SCRIPT}"
+  rm -f "${DOKPLOY_SEC_SCRIPT}"
 
-# Disable Dokploy's built-in auto-updater. "Install the latest at bootstrap" and
-# "let Dokploy upgrade itself unattended forever after" are separate decisions;
-# panel upgrades stay deliberate.
-docker service update \
-  --env-add SKIP_AUTO_UPDATE=true \
-  dokploy 2>/dev/null || true
+  # Disable Dokploy's built-in auto-updater. "Install the latest at bootstrap" and
+  # "let Dokploy upgrade itself unattended forever after" are separate decisions;
+  # panel upgrades stay deliberate.
+  docker service update \
+    --env-add SKIP_AUTO_UPDATE=true \
+    dokploy 2>/dev/null || true
 
-# Report what actually got installed, read back from the running service's image
-# tag — there is no constant to echo any more.
-DOKPLOY_IMAGE=$(docker service inspect dokploy \
-  --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || true)
-DOKPLOY_IMAGE="${DOKPLOY_IMAGE%%@*}"          # drop any @sha256: digest
-DOKPLOY_VERSION="${DOKPLOY_IMAGE##*:}"        # tag after the last colon
-if [[ -z "$DOKPLOY_VERSION" || "$DOKPLOY_VERSION" == "$DOKPLOY_IMAGE" ]]; then
-  DOKPLOY_VERSION="unknown (could not read the dokploy service image tag)"
+  # Report what actually got installed, read back from the running service's image
+  # tag — there is no constant to echo any more.
+  DOKPLOY_IMAGE=$(docker service inspect dokploy \
+    --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || true)
+  DOKPLOY_IMAGE="${DOKPLOY_IMAGE%%@*}"          # drop any @sha256: digest
+  DOKPLOY_VERSION="${DOKPLOY_IMAGE##*:}"        # tag after the last colon
+  if [[ -z "$DOKPLOY_VERSION" || "$DOKPLOY_VERSION" == "$DOKPLOY_IMAGE" ]]; then
+    DOKPLOY_VERSION="unknown (could not read the dokploy service image tag)"
+  fi
 fi
 
 # ─── UFW + ufw-docker ────────────────────────────────────────────────────────
 
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow 22/tcp   comment "SSH"
-ufw allow 80/tcp   comment "HTTP"
-ufw allow 443/tcp  comment "HTTPS"
-# Port 3000 (Dokploy) intentionally NOT opened to the public — reachable only
-# via Tailscale (persistent DOCKER-USER rule added below, after ufw-docker install)
+if [[ -n "$LAN_CIDR" ]]; then
+  # Private network: nothing public. SSH from the local network is the recovery path
+  # if Tailscale is down; everything else, Dokploy's SSH included, comes over the tailnet.
+  ufw allow from "${LAN_CIDR}" to any port 22 proto tcp comment "SSH from the LAN"
+  ufw allow in on tailscale0 comment "Tailnet"
+else
+  ufw allow 22/tcp   comment "SSH"
+  ufw allow 80/tcp   comment "HTTP"
+  ufw allow 443/tcp  comment "HTTPS"
+  # Port 3000 (Dokploy) intentionally NOT opened to the public — reachable only
+  # via Tailscale (persistent DOCKER-USER rule added below, after ufw-docker install)
+fi
 
 ufw --force enable
 systemctl enable ufw
@@ -365,8 +442,13 @@ ufw-docker install
 # "allow whatever serves port 80" — Traefik, by construction rather than by
 # configuration. A container publishing anything else is still blocked, which is what
 # ufw-docker is installed for.
-ufw route allow proto tcp from any to any port 80  comment "HTTP to whatever publishes it"
-ufw route allow proto tcp from any to any port 443 comment "HTTPS to whatever publishes it"
+#
+# On a private network there is no public HTTP to let through; the tailnet rule below
+# is the only way in to published ports.
+if [[ -z "$LAN_CIDR" ]]; then
+  ufw route allow proto tcp from any to any port 80  comment "HTTP to whatever publishes it"
+  ufw route allow proto tcp from any to any port 443 comment "HTTPS to whatever publishes it"
+fi
 
 # Allow the Dokploy admin UI (port 3000) to be reached over Tailscale only.
 # ufw-docker blocks Swarm-published ports by default, and a plain `ufw allow`
@@ -515,7 +597,11 @@ echo "${NEW_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${NEW_USER}"
 chmod 440 "/etc/sudoers.d/${NEW_USER}"
 
 mkdir -p "/home/${NEW_USER}/.ssh"
-echo "${SSH_PUBKEY}" >> "/home/${NEW_USER}/.ssh/authorized_keys"
+touch "/home/${NEW_USER}/.ssh/authorized_keys"
+# An existing account (e.g. one an image tool created via cloud-init) may already carry
+# the key.
+grep -qxF "${SSH_PUBKEY}" "/home/${NEW_USER}/.ssh/authorized_keys" \
+  || echo "${SSH_PUBKEY}" >> "/home/${NEW_USER}/.ssh/authorized_keys"
 chmod 700 "/home/${NEW_USER}/.ssh"
 chmod 600 "/home/${NEW_USER}/.ssh/authorized_keys"
 chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
@@ -532,7 +618,7 @@ if prompting_for SSH_TEST; then
   echo ""
   echo "========================================================"
   echo "IMPORTANT: Before continuing, open a NEW terminal and run:"
-  echo "  ssh ${NEW_USER}@${PUBLIC_IP}"
+  echo "  ssh ${NEW_USER}@${SSH_ADDR}"
   echo "  sudo -n true && echo OK"
   echo ""
   echo "Test sudo with 'sudo -n true', NOT 'sudo -v'. On sudo-rs (Ubuntu 26.04+)"
@@ -568,13 +654,20 @@ systemctl reload sshd
 echo ""
 echo "=== Bootstrap complete ==="
 echo "Hostname         : ${TS_HOSTNAME}   (OS, Swarm node and tailnet node)"
-echo "Public IP        : ${PUBLIC_IP}"
+[[ "$DOKPLOY_REMOTE" == 1 ]] && echo "Swarm advertise  : ${TAILSCALE_IP}   (tailnet)"
+echo "Public IP        : ${PUBLIC_IP:-none (LAN_CIDR=${LAN_CIDR})}"
 echo "Tailscale IP     : ${TAILSCALE_IP}"
 echo "Dokploy version  : ${DOKPLOY_VERSION}"
 echo ""
 echo "Next steps:"
-echo "  1. Open the Dokploy admin UI via Tailscale: http://${TS_HOSTNAME}.<tailnet>.ts.net:3000"
-echo "  2. Create the admin account and enable 2FA."
-echo "  3. Deploy your apps from the Dokploy UI."
+if [[ "$DOKPLOY_REMOTE" == 1 ]]; then
+  echo "  1. In the managing Dokploy: Remote Servers -> add this machine at ${TAILSCALE_IP},"
+  echo "     user ${NEW_USER}, with Dokploy's SSH key added to its authorized_keys."
+  echo "  2. Run that server's setup from the Dokploy UI; it installs what Dokploy needs."
+else
+  echo "  1. Open the Dokploy admin UI via Tailscale: http://${TS_HOSTNAME}.<tailnet>.ts.net:3000"
+  echo "  2. Create the admin account and enable 2FA."
+  echo "  3. Deploy your apps from the Dokploy UI."
+fi
 echo ""
-echo "Root login is now disabled. Use: ssh ${NEW_USER}@${PUBLIC_IP}"
+echo "Root login is now disabled. Use: ssh ${NEW_USER}@${SSH_ADDR}"

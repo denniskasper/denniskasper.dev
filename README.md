@@ -2,7 +2,9 @@
 
 Provisions a hardened single-node Dokploy server on a fresh Ubuntu LTS VPS:
 OS hardening, swap, Docker Swarm, Tailscale, UFW + ufw-docker, fail2ban, an SMTP
-relay for alerts, and Dokploy itself.
+relay for alerts, and Dokploy itself. Two optional inputs instead prepare a machine as
+a **remote server** for a Dokploy running elsewhere, including one behind NAT with no
+public address — see [Remote server and private network](#remote-server-and-private-network).
 
 It holds no facts about any particular machine. Every host-specific value is an
 input — the username, the SSH public key, the machine's name, the auth key,
@@ -47,6 +49,8 @@ Each value is taken from the environment if set, and prompted for otherwise:
 | `SMTP_PASSWORD` | SMTP app password | hidden input; see the appendix |
 | `SSH_TEST` | the pre-lockdown confirmation | see [SSH lockdown](#ssh-lockdown) |
 | `SWAP_SIZE` | — | env only, default `4G`; `0` disables |
+| `DOKPLOY_REMOTE` | — | env only, default `0`; `1` prepares a [remote server](#remote-server-and-private-network) |
+| `LAN_CIDR` | — | env only; set on a [private network](#remote-server-and-private-network), e.g. `192.168.1.0/24` |
 
 Supplying all of them lets the script run unattended, which is what makes a
 rehearsal cheap:
@@ -180,7 +184,8 @@ locked out of; the point of the pause is that a human proved the new key works
 while root was still available.
 
 ### Network exposure
-Public: **22, 80, 443**. That's all.
+Public: **22, 80, 443**. That's all. With `LAN_CIDR` set: nothing public at all —
+see [Remote server and private network](#remote-server-and-private-network).
 
 The Dokploy panel on :3000 is never exposed. UFW alone isn't enough — Docker's
 DNAT runs in `PREROUTING`, before UFW's `INPUT` chain ever sees the packet — so
@@ -243,6 +248,49 @@ Three defences, because a full disk is the most common way a small box dies:
 
 Plus a cron that emails `ALERT_EMAIL` when `/` passes 80%.
 
+### Remote server and private network
+Two optional inputs, one fact each, for machines that are not a public VPS running
+their own Dokploy — e.g. a machine on a private network managed by a VPS's Dokploy.
+
+**`DOKPLOY_REMOTE=1`** — another machine's Dokploy manages this one as a remote
+server. The script skips the Dokploy install: when the server is added under
+**Remote Servers**, Dokploy's own setup installs what it needs over SSH. It does
+initialise Swarm, on the **tailnet address**: Dokploy's setup would advertise the
+public IP `ifconfig.io` reports, which behind a NAT router is the router's, and
+`docker swarm init` refuses it. Dokploy skips that step when Swarm is already active.
+(Its error message suggests `ADVERTISE_ADDR`; the setup never reads it.) It also runs `tailscale up`
+**without `--ssh`**: Tailscale SSH answers port 22 on the tailnet address and
+authenticates by tailnet identity, never consulting `authorized_keys` — so Dokploy's
+SSH key, used over exactly that address, would not be what lets it in.
+
+**`LAN_CIDR=<network>`** — the machine sits on a private network with no public
+address. Nothing is opened publicly: SSH is allowed from that network (the recovery
+path when Tailscale is down) and everything is allowed in on `tailscale0`. No public
+IP is looked up, since it would be the router's. No 80/443, and no route rules for
+them.
+
+They are separate because they are separate facts: a second VPS managed as a remote
+server is `DOKPLOY_REMOTE=1` without `LAN_CIDR`. A machine on a private network managed remotely sets
+both:
+
+```bash
+DOKPLOY_REMOTE=1 LAN_CIDR=192.168.1.0/24 \
+NEW_USER=deploy SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" TS_HOSTNAME=node-01 … \
+  bash init-server.sh
+```
+
+The script's Docker install is Ubuntu's, on whatever architecture `dpkg` reports, so it
+runs on x86-64 and ARM64 alike.
+
+Provisioning differs from the VPS walkthrough above in two places. **Step 1**: a machine
+on a private network gets Ubuntu Server from the ISO or a vendor image, not a provider panel;
+give it a DHCP reservation so its LAN address stays put. **Step 3**: instead of a new
+panel, add the machine in the managing Dokploy under **Remote Servers** — its tailnet
+IP, `NEW_USER` (non-root with passwordless sudo is supported), and a key generated
+under **Settings → SSH Keys**, appended to that user's `authorized_keys` — then run
+**Setup Server**. Leave its **Security** tab alone: the bootstrap already did that
+work, and it would rewrite the firewall.
+
 ### Tailscale, and who may change it
 `tailscale up` runs as root, so tailscaled's state is root-owned and the write
 subcommands — `serve`, `funnel`, `set` — are denied to everyone else. The bootstrap
@@ -290,7 +338,7 @@ in an overlay that runs near the end, after the base system exists.
   beside `init-server.sh`; if nothing is found the step is skipped, so the script
   runs standalone.
 - The overlay receives `ALERT_EMAIL`, `PUBLIC_IP`, `TAILSCALE_IP`, `TS_HOSTNAME`
-  and `NEW_USER` in its environment.
+  and `NEW_USER` in its environment. `PUBLIC_IP` is empty when `LAN_CIDR` is set.
 
 This repo ships no overlay. The mechanism costs nothing and stays.
 

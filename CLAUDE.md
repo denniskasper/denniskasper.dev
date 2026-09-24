@@ -1,7 +1,9 @@
 ## CLAUDE.md
 
-This repo is a single generic bootstrap script for a Dokploy VPS. It holds no facts
-about any particular machine — every host-specific value is an input. Keep it that
+This repo is a single generic bootstrap script for a Dokploy server: a VPS running its
+own Dokploy, or (with `DOKPLOY_REMOTE` / `LAN_CIDR`) a remote server managed by a
+Dokploy elsewhere, including one on a private network. It holds no facts about any
+particular machine — every host-specific value is an input. Keep it that
 way: host facts belong in the operator's own notes, or in a site overlay.
 
 ## Git commits
